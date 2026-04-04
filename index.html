@@ -10,13 +10,52 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <div class="app mts-app">
+    <div
+      id="loginGate"
+      class="login-gate"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="loginGateTitle"
+    >
+      <div class="login-gate-card">
+        <h1 id="loginGateTitle" class="login-gate-title">Stock Life</h1>
+        <p class="login-gate-hint">
+          당신의 이름을 입력하세요 <span class="login-gate-example">(예: 최선웅)</span>
+        </p>
+        <label class="login-gate-label" for="loginNameInput">이름</label>
+        <input
+          id="loginNameInput"
+          class="login-gate-input"
+          type="text"
+          maxlength="32"
+          autocomplete="nickname"
+          placeholder="이름을 입력하세요"
+        />
+        <button type="button" id="btnLoginStart" class="btn-mts primary wide login-gate-btn">
+          게임 시작
+        </button>
+        <p id="loginGateError" class="login-gate-error" hidden role="alert"></p>
+      </div>
+    </div>
+
+    <div class="app mts-app" id="mainApp" hidden>
       <header class="mts-header">
         <div class="mts-brand">
           <span class="mts-logo">Stock Life</span>
           <span class="mts-tag">모의투자</span>
+          <span id="playerLoginBadge" class="mts-player-badge" hidden></span>
         </div>
         <div class="mts-header-actions">
+          <button
+            type="button"
+            id="btnResetData"
+            class="mts-icon-btn mts-reset-btn"
+            title="저장 데이터 삭제 후 새로고침"
+            aria-label="데이터 초기화"
+          >
+            <span aria-hidden="true">↻</span>
+            <span class="mts-reset-label">초기화</span>
+          </button>
           <time id="gameDateTime" class="mts-clock" aria-live="polite"
             >[1년차 4월 1일 09:00]</time
           >
@@ -32,6 +71,35 @@
           </button>
         </div>
       </header>
+
+      <section class="life-status-strip" aria-label="플레이어·체력·스트레스">
+        <div class="life-profile-row" id="lifeProfileRow">
+          <span class="life-profile-name" id="profileNameDisplay">—</span>
+          <span class="life-profile-meta"
+            ><span id="profileAgeDisplay">—</span
+            ><span class="life-profile-dot" aria-hidden="true">·</span
+            ><span id="profileBirthDisplay">—</span></span
+          >
+        </div>
+        <div class="life-gauge">
+          <div class="life-gauge-head">
+            <span class="life-gauge-label">체력 (HP)</span>
+            <span id="lifeHpText" class="life-gauge-value">100 / 100</span>
+          </div>
+          <div class="life-bar-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100" aria-labelledby="lifeHpText">
+            <div id="lifeHpFill" class="life-bar-fill life-bar-fill--hp" style="width: 100%"></div>
+          </div>
+        </div>
+        <div class="life-gauge">
+          <div class="life-gauge-head">
+            <span class="life-gauge-label">스트레스</span>
+            <span id="lifeStressText" class="life-gauge-value">0 / 100</span>
+          </div>
+          <div class="life-bar-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-labelledby="lifeStressText">
+            <div id="lifeStressFill" class="life-bar-fill life-bar-fill--stress" style="width: 0%"></div>
+          </div>
+        </div>
+      </section>
 
       <section class="asset-summary" aria-label="자산 요약">
         <div class="asset-summary-main">
@@ -61,7 +129,7 @@
             <span id="summaryCost" class="asset-cell-value">₩0</span>
           </div>
           <div class="asset-cell">
-            <span class="asset-label">인생 나이</span>
+            <span class="asset-label">시뮬 나이</span>
             <span id="age" class="asset-cell-value">25세</span>
           </div>
         </div>
@@ -96,6 +164,16 @@
                 <span id="detailStockName" class="detail-stock-name"></span>
                 <span id="detailStockTicker" class="detail-stock-ticker"></span>
               </div>
+              <button
+                type="button"
+                id="btnDetailWatchlist"
+                class="btn-watchlist detail-watch-btn"
+                aria-pressed="false"
+                aria-label="관심 종목"
+                title="관심 종목"
+              >
+                <span class="watchlist-star" aria-hidden="true">☆</span>
+              </button>
               <span id="detailVolBadge" class="mts-badge"></span>
             </div>
             <p id="detailStockDesc" class="stock-detail-desc"></p>
@@ -145,14 +223,20 @@
           hidden
           aria-labelledby="tab-btn-news"
         >
-          <section class="mts-section">
-            <h2 class="mts-section-title">뉴스 · 체이닝</h2>
-            <p class="mts-section-desc">
-              종목별 하루 <strong>최대 3건</strong> 속보 ·
-              <strong>P×(1+impact)+bias</strong>
-            </p>
-            <ul id="newsFeed" class="news-feed" aria-live="polite"></ul>
-          </section>
+          <div class="phone-news-shell">
+            <div class="phone-news-notch" aria-hidden="true"></div>
+            <div class="phone-news-status">
+              <span class="phone-news-time" id="phoneStatusTime">9:41</span>
+              <span class="phone-news-icons" aria-hidden="true">📶 🔋</span>
+            </div>
+            <section class="mts-section phone-news-inner">
+              <h2 class="phone-news-app-title">속보 피드</h2>
+              <p class="mts-section-desc phone-news-hint">
+                종목별 하루 <strong>최대 3건</strong> · 문맥으로 읽어 보세요.
+              </p>
+              <ul id="newsFeed" class="news-feed news-feed--phone" aria-live="polite"></ul>
+            </section>
+          </div>
           <section class="mts-section">
             <h2 class="mts-section-title">이번 주 경제 일정</h2>
             <ul id="calendarWeekList" class="calendar-week-list"></ul>
@@ -191,9 +275,163 @@
             </div>
           </section>
         </div>
+
+        <div
+          id="tab-life"
+          class="tab-panel"
+          role="tabpanel"
+          hidden
+          aria-labelledby="tab-btn-life"
+        >
+          <section class="mts-section">
+            <h2 class="mts-section-title">내 인생 · 리얼 알바</h2>
+            <p class="mts-section-desc">
+              각 알바는 <strong>현실 30초</strong> 동안 진행됩니다. 장 운영·캔들은
+              <strong>백그라운드에서 계속</strong> 돌아갑니다.
+            </p>
+            <ul class="parttime-list" aria-label="알바 선택">
+              <li class="parttime-card">
+                <div class="parttime-card-head">
+                  <span class="parttime-name">쿠팡 물류센터</span>
+                  <span class="parttime-tag parttime-tag--hard">고수익 · 폰 압수</span>
+                </div>
+                <p class="parttime-desc">
+                  30초 동안 차트가 가려지고 매매 불가. 끝나면 체력 대손실, 시드 대박.
+                </p>
+                <button type="button" class="btn-mts primary wide parttime-btn" data-parttime="coupang">
+                  출근 (30초 · 고정액)
+                </button>
+              </li>
+              <li class="parttime-card">
+                <div class="parttime-card-head">
+                  <span class="parttime-name">편의점 카운터</span>
+                  <span class="parttime-tag">저수익 · 단타 가능</span>
+                </div>
+                <p class="parttime-desc">
+                  화면 가림 없음. 차트·매매 자유. 수입은 쿠팡의 약 1/5.
+                </p>
+                <button type="button" class="btn-mts primary wide parttime-btn" data-parttime="mart">
+                  출근 (30초)
+                </button>
+              </li>
+              <li class="parttime-card">
+                <div class="parttime-card-head">
+                  <span class="parttime-name">호프집 서빙</span>
+                  <span class="parttime-tag">중수익 · 손님 호출</span>
+                </div>
+                <p class="parttime-desc">
+                  차트는 보이나, 랜덤으로 손님 호출 시 잠깐 매매가 막힙니다.
+                </p>
+                <button type="button" class="btn-mts primary wide parttime-btn" data-parttime="hof">
+                  출근 (30초)
+                </button>
+              </li>
+              <li class="parttime-card">
+                <div class="parttime-card-head">
+                  <span class="parttime-name">키즈카페</span>
+                  <span class="parttime-tag">중수익 · 돌발 울음</span>
+                </div>
+                <p class="parttime-desc">
+                  차트 확인 가능. 아이 울음 돌발 시 스트레스가 급상승할 수 있습니다.
+                </p>
+                <button type="button" class="btn-mts primary wide parttime-btn" data-parttime="kidscafe">
+                  출근 (30초)
+                </button>
+              </li>
+            </ul>
+          </section>
+        </div>
       </main>
 
       <p id="message" class="mts-toast" role="status"></p>
+
+      <div
+        id="jobCoupangOverlay"
+        class="job-coupang-overlay"
+        hidden
+        aria-hidden="true"
+      >
+        <div class="job-coupang-card">
+          <p class="job-coupang-title">열심히 상하차 중…</p>
+          <p class="job-coupang-sub">폰 확인 불가!</p>
+        </div>
+      </div>
+
+      <div
+        id="hofGuestOverlay"
+        class="hof-guest-overlay"
+        hidden
+        role="status"
+      >
+        <div class="hof-guest-bubble">
+          <span class="hof-guest-icon" aria-hidden="true">🔔</span>
+          <span>손님 호출! 잠시 주문 처리 중</span>
+        </div>
+      </div>
+
+      <div
+        id="characterSetupModal"
+        class="life-modal-overlay character-setup-overlay"
+        hidden
+        aria-modal="true"
+        role="dialog"
+        aria-labelledby="characterSetupTitle"
+      >
+        <div class="life-modal character-setup-modal">
+          <h3 id="characterSetupTitle" class="life-modal-title">캐릭터 설정</h3>
+          <p class="character-setup-lead">
+            모의투자를 시작하기 전에 프로필을 입력해 주세요.
+          </p>
+          <div class="character-setup-fields">
+            <label class="character-field">
+              <span class="character-label">이름</span>
+              <input
+                type="text"
+                id="setupPlayerName"
+                class="character-input"
+                maxlength="16"
+                autocomplete="nickname"
+                placeholder="이름"
+              />
+            </label>
+            <label class="character-field">
+              <span class="character-label">나이 (세)</span>
+              <input
+                type="number"
+                id="setupPlayerAge"
+                class="character-input"
+                min="15"
+                max="99"
+                value="20"
+              />
+            </label>
+            <label class="character-field">
+              <span class="character-label">생일</span>
+              <input type="date" id="setupPlayerBirth" class="character-input" />
+            </label>
+          </div>
+          <button type="button" id="btnCharacterSetupOk" class="btn-mts primary wide">
+            시작하기
+          </button>
+        </div>
+      </div>
+
+      <div
+        id="lifeEventModal"
+        class="life-modal-overlay"
+        hidden
+        aria-modal="true"
+        role="dialog"
+        aria-labelledby="lifeEventModalTitle"
+      >
+        <div class="life-modal">
+          <h3 id="lifeEventModalTitle" class="life-modal-title">인생 이벤트</h3>
+          <p id="lifeEventModalBody" class="life-modal-body"></p>
+          <button type="button" id="lifeEventModalOk" class="btn-mts primary wide">
+            확인
+          </button>
+        </div>
+      </div>
 
       <nav class="tab-bar" aria-label="메인 메뉴">
         <button
@@ -229,10 +467,47 @@
           <span class="tab-bar-icon" aria-hidden="true">💼</span>
           <span class="tab-bar-label">내 투자</span>
         </button>
+        <button
+          type="button"
+          class="tab-bar-btn"
+          id="tab-btn-life"
+          role="tab"
+          aria-selected="false"
+          data-tab="life"
+        >
+          <span class="tab-bar-icon" aria-hidden="true">🌿</span>
+          <span class="tab-bar-label">내 인생</span>
+        </button>
       </nav>
     </div>
 
+    <!-- 뷰포트 기준 최상단: .mts-app transform(흔들림) 영향 밖에서 클릭 보장 -->
+    <div
+      id="collapseModal"
+      class="life-modal-overlay collapse-modal-root"
+      hidden
+      aria-modal="true"
+      role="alertdialog"
+      aria-labelledby="collapseModalTitle"
+    >
+      <div class="life-modal life-modal--alert">
+        <h3 id="collapseModalTitle" class="life-modal-title">과로로 쓰러졌습니다</h3>
+        <p id="collapseModalBody" class="life-modal-body"></p>
+        <button type="button" id="collapseModalOk" class="btn-mts primary wide">
+          확인
+        </button>
+      </div>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2.49.1"
+        }
+      }
+    </script>
     <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
-    <script src="script.js"></script>
+    <script src="config.js"></script>
+    <script type="module" src="script.js?v=users-portfolios-1"></script>
   </body>
 </html>

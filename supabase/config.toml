@@ -1,0 +1,6 @@
+# Supabase CLI 프로젝트 루트 설정 예시
+# `supabase link` 후 배포에 사용
+
+[functions.market-tick]
+# Cron·서비스 롤로만 호출할 경우 JWT 검증 끔
+verify_jwt = false
