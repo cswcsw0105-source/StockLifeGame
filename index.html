@@ -2,63 +2,237 @@
 <html lang="ko">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Stock Life Game</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>Stock Life — 모의투자</title>
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <div class="app">
-      <header class="header">
-        <h1 class="title">Stock Life</h1>
-        <p class="subtitle">인생과 주식을 함께 굴리는 시뮬레이션</p>
+    <div class="app mts-app">
+      <header class="mts-header">
+        <div class="mts-brand">
+          <span class="mts-logo">Stock Life</span>
+          <span class="mts-tag">모의투자</span>
+        </div>
+        <div class="mts-header-actions">
+          <time id="gameDateTime" class="mts-clock" aria-live="polite"
+            >[1년차 4월 1일 09:00]</time
+          >
+          <button
+            type="button"
+            id="btnPause"
+            class="mts-icon-btn"
+            aria-pressed="false"
+            aria-label="시간 멈춤"
+          >
+            <span class="mts-pause-icon" aria-hidden="true">⏸</span>
+            <span class="mts-pause-label">멈춤</span>
+          </button>
+        </div>
       </header>
 
-      <main class="layout">
-        <section class="panel life-panel" aria-label="인생 상태">
-          <h2>인생</h2>
-          <div class="stat-grid">
-            <div class="stat">
-              <span class="stat-label">나이</span>
-              <span id="age" class="stat-value">25</span>
-            </div>
-            <div class="stat">
-              <span class="stat-label">현금</span>
-              <span id="cash" class="stat-value">₩10,000,000</span>
-            </div>
-            <div class="stat">
-              <span class="stat-label">총 자산</span>
-              <span id="netWorth" class="stat-value">₩10,000,000</span>
-            </div>
+      <section class="asset-summary" aria-label="자산 요약">
+        <div class="asset-summary-main">
+          <div class="asset-total">
+            <span class="asset-label">총 자산</span>
+            <span id="summaryNetWorth" class="asset-value">₩1,000,000</span>
           </div>
-          <div class="actions">
-            <button type="button" id="btnNextTurn" class="btn primary">
-              다음 턴 (1년)
-            </button>
+          <div class="asset-pl-block">
+            <span class="asset-label">평가손익</span>
+            <span id="summaryProfit" class="asset-sub value-neutral">₩0</span>
+            <span id="summaryProfitPct" class="asset-pct value-neutral"
+              >(0.00%)</span
+            >
           </div>
-        </section>
+        </div>
+        <div class="asset-summary-grid">
+          <div class="asset-cell">
+            <span class="asset-label">주식 평가</span>
+            <span id="summaryStockEval" class="asset-cell-value">₩0</span>
+          </div>
+          <div class="asset-cell">
+            <span class="asset-label">예수금</span>
+            <span id="summaryCash" class="asset-cell-value">₩1,000,000</span>
+          </div>
+          <div class="asset-cell">
+            <span class="asset-label">매입금액</span>
+            <span id="summaryCost" class="asset-cell-value">₩0</span>
+          </div>
+          <div class="asset-cell">
+            <span class="asset-label">인생 나이</span>
+            <span id="age" class="asset-cell-value">25세</span>
+          </div>
+        </div>
+      </section>
 
-        <section class="panel stock-panel" aria-label="주식 시장">
-          <h2>주식 시장</h2>
-          <table class="stock-table">
-            <thead>
-              <tr>
-                <th>종목</th>
-                <th>현재가</th>
-                <th>보유</th>
-                <th>매수 수량</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody id="stockRows"></tbody>
-          </table>
-        </section>
+      <main class="mts-main">
+        <div
+          id="tab-market"
+          class="tab-panel is-active"
+          role="tabpanel"
+          aria-labelledby="tab-btn-market"
+        >
+          <section id="marketListView" class="mts-section">
+            <h2 class="mts-section-title">시장 · 종목</h2>
+            <p class="mts-section-desc">
+              09:00~15:30 · <strong>현실 1초 = 장내 1분</strong> · 10분봉(게임 10분) =
+              현실 10초마다 확정 · 종목을 눌러 차트·매매
+            </p>
+            <ul id="stockListMain" class="stock-list-main" aria-label="종목 목록"></ul>
+          </section>
+
+          <section id="stockDetailView" class="mts-section stock-detail-view" hidden>
+            <div class="stock-detail-head">
+              <button
+                type="button"
+                id="btnBackToList"
+                class="btn-mts ghost btn-back-list"
+              >
+                ← 목록
+              </button>
+              <div class="stock-detail-title-block">
+                <span id="detailStockName" class="detail-stock-name"></span>
+                <span id="detailStockTicker" class="detail-stock-ticker"></span>
+              </div>
+              <span id="detailVolBadge" class="mts-badge"></span>
+            </div>
+            <p id="detailStockDesc" class="stock-detail-desc"></p>
+            <div class="chart-stack">
+              <div
+                id="apexCandleDetail"
+                class="apex-candle"
+                aria-label="종목 캔들"
+              ></div>
+              <div
+                id="apexVolumeDetail"
+                class="apex-vol"
+                aria-label="거래량"
+              ></div>
+            </div>
+            <div class="detail-trade-panel">
+              <div class="detail-trade-row">
+                <span class="detail-label">현재가</span>
+                <span id="detailCurrentPrice" class="detail-price"></span>
+              </div>
+              <div class="detail-trade-row">
+                <label class="detail-label" for="detailQtyInput">수량</label>
+                <input
+                  type="number"
+                  id="detailQtyInput"
+                  class="qty-input detail-qty"
+                  min="1"
+                  value="1"
+                />
+              </div>
+              <div class="detail-trade-actions">
+                <button type="button" id="detailBtnBuy" class="btn-mts buy wide">
+                  매수
+                </button>
+                <button type="button" id="detailBtnSell" class="btn-mts sell wide">
+                  매도
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div
+          id="tab-news"
+          class="tab-panel"
+          role="tabpanel"
+          hidden
+          aria-labelledby="tab-btn-news"
+        >
+          <section class="mts-section">
+            <h2 class="mts-section-title">뉴스 · 체이닝</h2>
+            <p class="mts-section-desc">
+              종목별 하루 <strong>최대 3건</strong> 속보 ·
+              <strong>P×(1+impact)+bias</strong>
+            </p>
+            <ul id="newsFeed" class="news-feed" aria-live="polite"></ul>
+          </section>
+          <section class="mts-section">
+            <h2 class="mts-section-title">이번 주 경제 일정</h2>
+            <ul id="calendarWeekList" class="calendar-week-list"></ul>
+          </section>
+        </div>
+
+        <div
+          id="tab-portfolio"
+          class="tab-panel"
+          role="tabpanel"
+          hidden
+          aria-labelledby="tab-btn-portfolio"
+        >
+          <section class="mts-section">
+            <h2 class="mts-section-title">내 투자</h2>
+            <div class="portfolio-table-wrap">
+              <table class="stock-table">
+                <thead>
+                  <tr>
+                    <th>종목</th>
+                    <th>현재가</th>
+                    <th>평단가</th>
+                    <th>보유</th>
+                    <th>평가손익</th>
+                    <th>수량</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="stockRows"></tbody>
+              </table>
+            </div>
+            <div class="portfolio-actions">
+              <button type="button" id="btnNextTurn" class="btn-mts primary">
+                다음 턴 (1년)
+              </button>
+            </div>
+          </section>
+        </div>
       </main>
 
-      <footer class="footer">
-        <p id="message" class="message" role="status"></p>
-      </footer>
+      <p id="message" class="mts-toast" role="status"></p>
+
+      <nav class="tab-bar" aria-label="메인 메뉴">
+        <button
+          type="button"
+          class="tab-bar-btn is-active"
+          id="tab-btn-market"
+          role="tab"
+          aria-selected="true"
+          data-tab="market"
+        >
+          <span class="tab-bar-icon" aria-hidden="true">📈</span>
+          <span class="tab-bar-label">시장 현황</span>
+        </button>
+        <button
+          type="button"
+          class="tab-bar-btn"
+          id="tab-btn-news"
+          role="tab"
+          aria-selected="false"
+          data-tab="news"
+        >
+          <span class="tab-bar-icon" aria-hidden="true">📰</span>
+          <span class="tab-bar-label">뉴스</span>
+        </button>
+        <button
+          type="button"
+          class="tab-bar-btn"
+          id="tab-btn-portfolio"
+          role="tab"
+          aria-selected="false"
+          data-tab="portfolio"
+        >
+          <span class="tab-bar-icon" aria-hidden="true">💼</span>
+          <span class="tab-bar-label">내 투자</span>
+        </button>
+      </nav>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
     <script src="script.js"></script>
   </body>
 </html>
