@@ -32,24 +32,37 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* ----- 이름표 로그인 전체 화면 ----- */
-.login-gate {
-  position: fixed;
-  inset: 0;
-  z-index: 2147483646;
-  display: flex;
+/* ----- SPA 화면 전환 (오버레이 없음, display만 토글) ----- */
+.screen {
+  display: none;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.screen--login,
+.screen--setup,
+.screen--tutorial {
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   padding: 24px;
+  padding-top: max(24px, env(safe-area-inset-top, 0px));
   padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
   background: radial-gradient(ellipse 120% 80% at 50% 20%, #1a2030 0%, var(--bg) 55%);
 }
 
-.login-gate[hidden] {
-  display: none !important;
+.screen--game {
+  background: var(--bg);
 }
 
-.login-gate-card {
+.screen--game .mts-app {
+  flex: 1;
+  min-height: 0;
+}
+
+.screen-card {
   width: 100%;
   max-width: 360px;
   padding: 28px 24px;
@@ -57,6 +70,17 @@ body {
   border: 1px solid var(--border);
   background: var(--bg-card);
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+}
+
+.tutorial-screen-card {
+  max-width: 420px;
+}
+
+.screen-setup-title {
+  margin: 0 0 12px;
+  font-size: 1.15rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
 }
 
 .login-gate-title {
@@ -247,25 +271,25 @@ body {
   font-weight: 600;
 }
 
-/* ===== Life status (HP / Stress) ===== */
+/* ===== Life status (프로필) ===== */
 .life-status-strip {
   margin: 10px 16px 0;
   padding: 12px 14px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+}
+
+.life-status-strip--profile .life-profile-row {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
 }
 
 .life-profile-row {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding-bottom: 8px;
-  margin-bottom: 2px;
-  border-bottom: 1px solid var(--border);
 }
 
 .life-profile-name {
@@ -283,48 +307,6 @@ body {
 .life-profile-dot {
   margin: 0 6px;
   opacity: 0.5;
-}
-
-.life-gauge-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 4px;
-}
-
-.life-gauge-label {
-  font-size: 0.65rem;
-  font-weight: 700;
-  color: var(--text-dim);
-  letter-spacing: 0.02em;
-}
-
-.life-gauge-value {
-  font-size: 0.68rem;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  color: var(--text);
-}
-
-.life-bar-track {
-  height: 8px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.06);
-  overflow: hidden;
-}
-
-.life-bar-fill {
-  height: 100%;
-  border-radius: 6px;
-  transition: width 0.35s ease;
-}
-
-.life-bar-fill--hp {
-  background: linear-gradient(90deg, #34d399, #6ee7b7);
-}
-
-.life-bar-fill--stress {
-  background: linear-gradient(90deg, #f97316, #fb7185);
 }
 
 /* ===== Asset summary ===== */
@@ -525,11 +507,89 @@ body {
 }
 
 .chart-stack {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 2px;
   width: 100%;
   margin-top: 8px;
+}
+
+.chart-premarket-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 210px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse 90% 70% at 50% 45%,
+    rgba(9, 11, 16, 0.72) 0%,
+    rgba(9, 11, 16, 0.88) 100%
+  );
+  border-radius: 12px;
+  border: 1px solid rgba(249, 115, 22, 0.22);
+  box-shadow: inset 0 0 40px rgba(249, 115, 22, 0.06);
+}
+
+.chart-premarket-overlay[hidden] {
+  display: none !important;
+}
+
+.chart-premarket-overlay__inner {
+  text-align: center;
+  padding: 16px 20px;
+  max-width: 92%;
+}
+
+.chart-premarket-overlay__title {
+  margin: 0 0 8px;
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: #fdba74;
+  text-shadow: 0 0 24px rgba(249, 115, 22, 0.35);
+  animation: premktPulse 1.8s ease-in-out infinite;
+}
+
+.chart-premarket-overlay__sub {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+@keyframes premktPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.82;
+  }
+}
+
+@keyframes chartGapFlash {
+  0% {
+    box-shadow: inset 0 0 0 rgba(249, 115, 22, 0);
+  }
+  35% {
+    box-shadow:
+      inset 0 0 48px rgba(249, 115, 22, 0.25),
+      0 0 32px rgba(249, 115, 22, 0.15);
+  }
+  100% {
+    box-shadow: inset 0 0 0 rgba(249, 115, 22, 0);
+  }
+}
+
+.chart-stack.chart-gap-open-flash {
+  animation: chartGapFlash 1.25s ease-out;
 }
 
 .apex-candle {
@@ -977,6 +1037,34 @@ body {
   font-size: 0.8rem;
 }
 
+.news-item.news-premarket-pos {
+  border-color: rgba(251, 113, 133, 0.45);
+  background: linear-gradient(
+    135deg,
+    rgba(251, 113, 133, 0.1) 0%,
+    rgba(18, 21, 28, 0.96) 55%
+  );
+}
+
+.news-item.news-premarket-neg {
+  border-color: rgba(96, 165, 250, 0.4);
+  background: linear-gradient(
+    135deg,
+    rgba(59, 130, 246, 0.1) 0%,
+    rgba(18, 21, 28, 0.96) 55%
+  );
+}
+
+.news-item.news-premarket-open {
+  border-color: rgba(251, 191, 36, 0.5);
+  background: linear-gradient(
+    135deg,
+    rgba(251, 191, 36, 0.12) 0%,
+    rgba(18, 21, 28, 0.95) 50%
+  );
+  font-weight: 700;
+}
+
 .news-impact-tag {
   display: inline-block;
   margin-top: 6px;
@@ -1173,7 +1261,7 @@ body {
   border: 1px solid var(--border);
   font-size: 0.78rem;
   color: var(--text-dim);
-  z-index: 50;
+  z-index: 999999;
   pointer-events: none;
   text-align: center;
 }
@@ -1239,55 +1327,84 @@ body {
   white-space: nowrap;
 }
 
-/* Life tab · part-time */
-.parttime-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+/* Life tab · 알바 스케줄 예약 */
+.job-schedule-warning {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(248, 113, 113, 0.12);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  color: #fecaca;
+  font-size: 0.82rem;
+  font-weight: 700;
+  line-height: 1.45;
 }
 
-.parttime-card {
-  padding: 14px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  background: var(--bg-card);
-}
-
-.parttime-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-
-.parttime-name {
+.job-schedule-month-label {
   font-size: 0.95rem;
-  font-weight: 700;
+  font-weight: 800;
+  margin-bottom: 10px;
 }
 
-.parttime-tag {
-  font-size: 0.58rem;
+.job-schedule-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  margin-bottom: 6px;
+  font-size: 0.62rem;
   font-weight: 700;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: rgba(49, 130, 246, 0.15);
-  color: #93c5fd;
+  color: var(--text-dim);
+  text-align: center;
 }
 
-.parttime-tag--hard {
-  background: rgba(248, 113, 113, 0.15);
+.job-schedule-calendar {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.job-schedule-day {
+  aspect-ratio: 1;
+  min-height: 36px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+  font-family: inherit;
+}
+
+.job-schedule-day.is-muted {
+  opacity: 0.22;
+  pointer-events: none;
+}
+
+.job-schedule-day.is-selected {
+  background: rgba(49, 130, 246, 0.25);
+  border-color: var(--accent);
+  color: #dbeafe;
+}
+
+.job-schedule-summary {
+  margin: 0 0 8px;
+  font-size: 0.88rem;
+  color: var(--text-dim);
+}
+
+.job-schedule-penalty-hint {
+  margin: 0 0 12px;
+  font-size: 0.78rem;
   color: #fca5a5;
 }
 
-.parttime-desc {
-  margin: 0 0 10px;
-  font-size: 0.78rem;
-  color: var(--text-dim);
-  line-height: 1.4;
+.news-text--fatigue {
+  filter: blur(2.5px);
+  opacity: 0.72;
+  text-shadow: 0 0 12px rgba(0, 0, 0, 0.45);
 }
 
 .btn-mts.is-trade-locked {
@@ -1295,136 +1412,30 @@ body {
   cursor: not-allowed;
 }
 
-/* Life modals */
-.life-modal-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 200;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
-  background: rgba(5, 8, 14, 0.72);
-  backdrop-filter: blur(6px);
-  pointer-events: auto;
-}
-
-/* 과로 모달: body 직하 + 최상위 z-index (알바 오버레이·탭·흔들림 transform보다 위) */
-.collapse-modal-root.life-modal-overlay {
-  z-index: 2147483000;
-  isolation: isolate;
-}
-
-.collapse-modal-root .life-modal {
-  position: relative;
-  z-index: 1;
-  pointer-events: auto;
-}
-
-.collapse-modal-root #collapseModalOk {
-  position: relative;
-  z-index: 2;
-  pointer-events: auto;
-  cursor: pointer;
-}
-
-.life-modal {
-  width: 100%;
-  max-width: 360px;
-  padding: 20px;
-  border-radius: 16px;
-  border: 1px solid var(--border);
-  background: var(--bg-card);
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
-  pointer-events: auto;
-}
-
-.life-modal--alert {
-  border-color: rgba(248, 113, 113, 0.35);
-}
-
-.life-modal-title {
-  margin: 0 0 12px;
-  font-size: 1.05rem;
-  font-weight: 800;
-  letter-spacing: -0.02em;
-}
-
-.life-modal-body {
-  margin: 0 0 18px;
+.tutorial-steps {
+  margin: 0 0 20px;
+  padding: 0;
+  list-style: none;
   font-size: 0.88rem;
   color: var(--text-dim);
   line-height: 1.55;
 }
 
-/* 쿠팡 알바 — 차트·시세 차단 오버레이 */
-.job-coupang-overlay {
-  position: fixed;
-  inset: 0;
-  bottom: calc(var(--tab-h) + var(--safe-bottom));
-  z-index: 130;
+.tutorial-steps li {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.88);
-  backdrop-filter: blur(2px);
+  gap: 10px;
+  margin-bottom: 14px;
+  align-items: flex-start;
 }
 
-.job-coupang-card {
-  text-align: center;
-  padding: 28px 24px;
-  max-width: 300px;
-  border-radius: 20px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(18, 22, 30, 0.95);
+.tutorial-steps li:last-child {
+  margin-bottom: 0;
 }
 
-.job-coupang-title {
-  margin: 0 0 8px;
+.tutorial-step-emoji {
+  flex-shrink: 0;
   font-size: 1.1rem;
-  font-weight: 800;
-}
-
-.job-coupang-sub {
-  margin: 0;
-  font-size: 0.88rem;
-  color: #fca5a5;
-  font-weight: 700;
-}
-
-/* 호프 — 손님 호출 배너 */
-.hof-guest-overlay {
-  position: fixed;
-  left: 16px;
-  right: 16px;
-  bottom: calc(var(--tab-h) + var(--safe-bottom) + 12px);
-  z-index: 135;
-  pointer-events: none;
-}
-
-.hof-guest-bubble {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 12px 16px;
-  border-radius: 16px;
-  background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
-  border: 1px solid rgba(96, 165, 250, 0.35);
-  font-size: 0.82rem;
-  font-weight: 700;
-  color: #e0f2fe;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
-}
-
-.hof-guest-icon {
-  font-size: 1.1rem;
-}
-
-/* 캐릭터 설정 */
-.character-setup-modal .life-modal-title {
-  margin-bottom: 8px;
+  line-height: 1.4;
 }
 
 .character-setup-lead {

@@ -66,6 +66,10 @@ CREATE POLICY "portfolios_all" ON public.portfolios FOR ALL USING (TRUE) WITH CH
 DROP POLICY IF EXISTS "market_state_read_all" ON public.market_state;
 CREATE POLICY "market_state_read_all" ON public.market_state FOR SELECT USING (TRUE);
 
+-- 클라이언트 주도 틱: anon 이 market_state 1행을 UPDATE (updated_at 낙관적 잠금은 앱에서 처리)
+DROP POLICY IF EXISTS "market_state_update_all" ON public.market_state;
+CREATE POLICY "market_state_update_all" ON public.market_state FOR UPDATE USING (TRUE) WITH CHECK (TRUE);
+
 -- ----- 5) Realtime: market_state를 publication에 등록 -----
 DO $pub$
 BEGIN
