@@ -19,12 +19,12 @@
 -- ----- 1) 테이블: users (플레이어 자산·상태) -----
 CREATE TABLE IF NOT EXISTS public.users (
   login_name TEXT PRIMARY KEY CHECK (char_length(trim(login_name)) BETWEEN 1 AND 32),
-  cash BIGINT NOT NULL DEFAULT 1000000 CHECK (cash >= 0),
+  cash BIGINT NOT NULL DEFAULT 10000000 CHECK (cash >= 0),
   hp INTEGER NOT NULL DEFAULT 100 CHECK (hp >= 0 AND hp <= 100),
   stress INTEGER NOT NULL DEFAULT 0 CHECK (stress >= 0 AND stress <= 100),
   sim_age INTEGER NOT NULL DEFAULT 25,
   trade_blocked_until_ms BIGINT NOT NULL DEFAULT 0,
-  initial_capital BIGINT NOT NULL DEFAULT 1000000,
+  initial_capital BIGINT NOT NULL DEFAULT 10000000,
   profile JSONB NOT NULL DEFAULT '{}'::JSONB,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

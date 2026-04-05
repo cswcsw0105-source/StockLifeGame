@@ -1482,6 +1482,216 @@ body {
   border-color: var(--accent);
 }
 
+/* ----- 10호가 · 체결강도 ----- */
+.detail-orderbook-panel {
+  margin-top: 10px;
+  padding: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.detail-orderbook-hint {
+  margin: 0 0 10px;
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.detail-exec-strength {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.detail-exec-strength__label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.detail-exec-strength__track {
+  flex: 1;
+  height: 10px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.detail-exec-strength__bar {
+  height: 100%;
+  width: 66%;
+  border-radius: 5px;
+  background: linear-gradient(90deg, #64748b, #94a3b8);
+  transition: width 0.35s ease, background 0.25s ease;
+}
+
+.detail-exec-strength__bar.is-hot {
+  background: linear-gradient(90deg, #f87171, #fb923c);
+  box-shadow: 0 0 12px rgba(251, 146, 60, 0.35);
+}
+
+.detail-exec-strength__bar.is-cold {
+  background: linear-gradient(90deg, #60a5fa, #818cf8);
+}
+
+.detail-exec-strength__pct {
+  font-size: 0.85rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  min-width: 3.2rem;
+  text-align: right;
+  color: var(--text);
+}
+
+.orderbook-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.72rem;
+}
+
+.ob-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 56px minmax(52px, 0.9fr);
+  align-items: center;
+  gap: 6px;
+  padding: 4px 2px;
+  border-radius: 6px;
+}
+
+.ob-row--ask {
+  background: rgba(248, 113, 113, 0.06);
+}
+
+.ob-row--bid {
+  background: rgba(59, 130, 246, 0.06);
+}
+
+.ob-tag {
+  font-size: 0.6rem;
+  font-weight: 700;
+  color: var(--text-dim);
+}
+
+.ob-price {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.ob-vol {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.ob-vol-bar {
+  display: block;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.ob-vol-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.85);
+}
+
+.ob-row--ask .ob-vol-bar i {
+  background: rgba(248, 113, 113, 0.65);
+}
+
+.ob-row--bid .ob-vol-bar i {
+  background: rgba(96, 165, 250, 0.65);
+}
+
+.ob-mid {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 4px;
+  margin: 4px 0;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  border-top: 1px dashed var(--border);
+  border-bottom: 1px dashed var(--border);
+}
+
+.ob-mid strong {
+  font-size: 0.88rem;
+  color: var(--text);
+}
+
+/* ----- 친구 풀매수/풀매도 토스트 ----- */
+.friend-trade-toast {
+  position: fixed;
+  top: 18%;
+  left: 50%;
+  transform: translateX(-50%) scale(0.96);
+  z-index: 10000000;
+  max-width: min(92vw, 400px);
+  padding: 16px 20px;
+  border-radius: 16px;
+  background: linear-gradient(
+    145deg,
+    rgba(30, 27, 20, 0.97) 0%,
+    rgba(55, 35, 15, 0.98) 100%
+  );
+  border: 2px solid rgba(251, 191, 36, 0.65);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.5),
+    0 16px 48px rgba(251, 146, 60, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  pointer-events: none;
+  text-align: center;
+}
+
+.friend-trade-toast[hidden] {
+  display: none !important;
+}
+
+.friend-trade-toast__text {
+  font-size: 0.95rem;
+  font-weight: 800;
+  line-height: 1.45;
+  color: #fde68a;
+  text-shadow: 0 0 20px rgba(251, 191, 36, 0.45);
+}
+
+.friend-trade-toast--flash {
+  animation: friendToastPop 2.6s ease forwards;
+}
+
+@keyframes friendToastPop {
+  0% {
+    opacity: 0;
+    transform: translateX(-50%) scale(0.88);
+  }
+  8% {
+    opacity: 1;
+    transform: translateX(-50%) scale(1.04);
+  }
+  15% {
+    transform: translateX(-50%) scale(1);
+  }
+  88% {
+    opacity: 1;
+    transform: translateX(-50%) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-50%) scale(0.98);
+  }
+}
+
 @media (min-width: 720px) {
   .mts-app {
     max-width: 720px;
