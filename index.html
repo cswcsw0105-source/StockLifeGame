@@ -154,7 +154,7 @@
           <div class="asset-summary-main">
             <div class="asset-total">
               <span class="asset-label">총 자산</span>
-              <span id="summaryNetWorth" class="asset-value">₩1,000,000</span>
+              <span id="summaryNetWorth" class="asset-value">₩10,000,000</span>
             </div>
             <div class="asset-pl-block">
               <span class="asset-label">평가손익</span>
@@ -171,7 +171,7 @@
             </div>
             <div class="asset-cell">
               <span class="asset-label">예수금</span>
-              <span id="summaryCash" class="asset-cell-value">₩1,000,000</span>
+              <span id="summaryCash" class="asset-cell-value">₩10,000,000</span>
             </div>
             <div class="asset-cell">
               <span class="asset-label">매입금액</span>
@@ -250,6 +250,22 @@
                   class="apex-vol"
                   aria-label="거래량"
                 ></div>
+              </div>
+              <div class="detail-orderbook-panel" id="detailOrderBookPanel" aria-label="10호가·체결강도">
+                <div class="detail-exec-strength">
+                  <span class="detail-exec-strength__label">체결강도</span>
+                  <div class="detail-exec-strength__track">
+                    <div
+                      class="detail-exec-strength__bar"
+                      id="detailExecStrengthBar"
+                    ></div>
+                  </div>
+                  <span class="detail-exec-strength__pct" id="detailExecStrengthPct"
+                    >100.0%</span
+                  >
+                </div>
+                <p class="detail-orderbook-hint">호가는 시뮬레이션 · 체결강도는 현재가 방향 기준 랜덤</p>
+                <div class="orderbook-rows" id="detailOrderBookRows"></div>
               </div>
               <div class="detail-trade-panel">
                 <div class="detail-trade-row">
@@ -416,6 +432,16 @@
           </button>
         </nav>
       </div>
+    </div>
+
+    <div
+      id="friendTradeToast"
+      class="friend-trade-toast"
+      hidden
+      role="status"
+      aria-live="assertive"
+    >
+      <span class="friend-trade-toast__text" id="friendTradeToastText"></span>
     </div>
 
     <p id="message" class="mts-toast" role="status"></p>

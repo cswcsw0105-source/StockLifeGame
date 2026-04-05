@@ -113,3 +113,13 @@
 
 - `LS_KEY` / `collectSavePayload()`에 들어 있는 필드는 위 `user_portfolios` + 스냅샷과 1:1 매핑하기 좋다.
 - 오프라인 배당 `computeOfflineDividendAccrual`은 서버 RPC의 **단순화 버전**으로 유지할 수 있다.
+
+## 8. 전역 리셋·친구 매매 알림 마이그레이션
+
+배포 시 `supabase/migrations/20260406120000_world_reset_social_orderbook.sql`을 적용하면 다음이 반영된다.
+
+- 모든 유저 `cash` / `initial_capital`을 **1천만원**으로 맞추고 `portfolios`를 비운다(기존 `trade_logs`·`assets` 테이블이 있으면 DROP).
+- `social_trade_events` 테이블 + Realtime INSERT 구독으로 **풀매수(가용 현금의 90% 이상 단일 매수)** / **풀매도(전량 매도)** 시 친구에게 알림.
+- 선택 RPC `reset_world_if_token`으로 동일 초기화를 토큰 문자열로 재실행 가능(토큰은 SQL 내 문자열을 배포 전에 변경할 것).
+
+클라이언트는 `?clearLocal=1` 쿼리로 `localStorage` 튜토리얼 플래그·`sessionStorage` 로그인 이름을 한 번 비울 수 있다.
