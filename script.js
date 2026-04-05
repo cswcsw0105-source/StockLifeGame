@@ -23,6 +23,13 @@ let tutorialGateActive = false;
 const MAX_NEWS_ITEMS = 48;
 const NEXT_TRADING_DAY_DELAY_MS = 2200;
 const INITIAL_CAPITAL = 10_000_000;
+/** 게임 캘린더 매월 1일 자동 입금 */
+const MONTHLY_SALARY = 3_000_000;
+/** 이 금액 미만이면 급전 알바 버튼 활성(게임 규칙) */
+const EMERGENCY_JOB_CASH_THRESHOLD = 1_000_000;
+/** 한강 급전 알바 매매 잠금(밀리초) — DB `emergency_han_river_job` 과 동일 */
+const EMERGENCY_LOCK_MS = 15 * 60 * 1000;
+const SHARE_QTY_DECIMALS = 6;
 
 /** 현실 1초 = 게임 내 1분 */
 const GAME_MINUTES_PER_REAL_SEC = 1;
@@ -50,35 +57,28 @@ const ONLINE_STALE_AFTER_MS = 10_000;
 const CANDLE_UP = "#ff4b4b";
 const CANDLE_DOWN = "#3182f6";
 
-/** 이번 달 알바 스케줄: 일당 시드 지급 · N일 이상 시 피로 패널티 */
-const JOB_PAY_PER_DAY = 22_000;
-const JOB_OVERWORK_DAYS = 15;
-/** 피로 시 매수·매도 가격 대비 추가 부담(실수 수수료) */
-const FATIGUE_EXTRA_FEE_RATE = 0.052;
-
-/** 플레이어 프로필 — 캐릭터 설정 + 알바 스케줄(프로필 JSON 동기화) */
+/** 플레이어 프로필 — 캐릭터 설정 + 월급 기록(프로필 JSON 동기화) */
 let playerProfile = {
   name: "",
   age: 20,
   birthday: "",
   setupComplete: false,
-  /** `"2026-4"`: { count, days: number[], overwork } */
-  jobCommitByMonth: {},
+  /** `"2000-4"` 형태 — 해당 월 1일 월급 지급 여부 */
+  lastSalaryMonthKey: "",
 };
 
 let gameClockEverStarted = false;
 let phoneClockIntervalId = null;
 
-/** 이 게임일 인덱스에 도달하면 인생 이벤트 1회(차단 모달 없음) */
-let lifeNextEventDayIndex = 999999;
-
-/** 과다 알바 시 다음 달 시작까지: 뉴스 지연·가림 + 매매 추가 부담 */
-let jobFatigueUntilDayIndex = 0;
-
 let newsFeedRevealTimers = [];
 
-/** 달력 UI에서 선택한 일(1~31) */
-let jobScheduleSelectedDays = new Set();
+/** 상세 매매: 주 단위 | 원화 금액(체결 수량은 시가로 환산) */
+let detailTradeInputMode = "shares";
+/** 상세 패널 미리보기: 마지막으로 누른 매수/매도 */
+let lastDetailTradeAction = "buy";
+
+/** 급전 알바 잠금 해제까지 1초 폴링 */
+let tradeLockPollIntervalId = null;
 
 /** 신규 게임 시 시초가: 10,000 ~ 50,000원 균등 랜덤(정수) */
 function randomInitialPrice() {
@@ -243,6 +243,8 @@ const game = {
   costBasis: {},
   /** 손익 표시 기준(세션 시작 자본) */
   initialCapital: INITIAL_CAPITAL,
+  /** 서버 `users.trade_blocked_until_ms` — 급전 알바 등(실시간 잠금) */
+  tradeBlockedUntilMs: 0,
 };
 
 let gameDayIndex = 0;
@@ -320,39 +322,6 @@ let selectedStockId = null;
 /** 관심 종목 티커 — 뉴스 가중치에 사용 */
 let watchlistIds = [];
 
-const LIFE_RANDOM_EVENTS = [
-  {
-    body: "전공 과제에 시달리다 배달 음식으로 한 끼를 때웠습니다. 지출이 생겼지만 숨이 좀 돌아왔습니다.",
-    apply() {
-      game.cash = Math.max(0, game.cash - 30_000);
-    },
-  },
-  {
-    body: "학생회 오티 회비를 납부했습니다. 계좌에서 돈이 빠져나갔습니다.",
-    apply() {
-      game.cash = Math.max(0, game.cash - 50_000);
-    },
-  },
-  {
-    body: "친구들과 멀리 떠난 바다 여행을 다녀왔습니다. 통장은 가벼워졌지만 기분은 좋았습니다.",
-    apply() {
-      game.cash = Math.max(0, game.cash - 150_000);
-    },
-  },
-  {
-    body: "동아리 방에서 밤새 과제를 마무리했습니다. 카페 값과 야식 비용이 들었습니다.",
-    apply() {
-      game.cash = Math.max(0, game.cash - 18_000);
-    },
-  },
-  {
-    body: "어릴 적 친구가 찾아와 오랜만에 밥을 사줬습니다. 덕분에 지갑은 그대로였습니다.",
-    apply() {
-      /* 변동 없음 */
-    },
-  },
-];
-
 function GAME_ANCHOR_DATE() {
   return new Date(2000, 3, 1);
 }
@@ -381,18 +350,70 @@ function getMonthContextForDayIndex(dayIndex) {
   return { y, m: mo + 1, startIdx, daysInMonth, padSun, monthKey };
 }
 
-function firstDayIndexOfNextMonth(dayIdx) {
-  const d = dayIndexToDate(dayIdx);
-  const next = new Date(d.getFullYear(), d.getMonth() + 1, 1);
-  return dateToDayIndex(next);
+function roundShareQty(q) {
+  const n = Number(q);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  const f = 10 ** SHARE_QTY_DECIMALS;
+  return Math.round(n * f) / f;
 }
 
-function hasJobFatigue() {
-  return gameDayIndex < jobFatigueUntilDayIndex;
+function formatShares(q) {
+  const n = Number(q);
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  return n.toLocaleString("ko-KR", { maximumFractionDigits: SHARE_QTY_DECIMALS });
+}
+
+function isTradeBlockedByPenalty() {
+  const until = game.tradeBlockedUntilMs || 0;
+  return until > 0 && Date.now() < until;
+}
+
+function ensureTradeLockPolling() {
+  if (!game.tradeBlockedUntilMs || Date.now() >= game.tradeBlockedUntilMs) {
+    if (tradeLockPollIntervalId) {
+      clearInterval(tradeLockPollIntervalId);
+      tradeLockPollIntervalId = null;
+    }
+    return;
+  }
+  if (tradeLockPollIntervalId) return;
+  tradeLockPollIntervalId = setInterval(() => {
+    syncTradeButtons();
+    updateDetailTradeLivePreview();
+    renderLifeTab();
+    if (!game.tradeBlockedUntilMs || Date.now() >= game.tradeBlockedUntilMs) {
+      clearInterval(tradeLockPollIntervalId);
+      tradeLockPollIntervalId = null;
+      syncTradeButtons();
+    }
+  }, 1000);
+}
+
+function maybeApplyMonthlySalary() {
+  const { day } = getCalendarParts(gameDayIndex);
+  const ctx = getMonthContextForDayIndex(gameDayIndex);
+  const mk = ctx.monthKey;
+  if (day !== 1) return;
+  if (playerProfile.lastSalaryMonthKey === mk) return;
+  game.cash += MONTHLY_SALARY;
+  playerProfile.lastSalaryMonthKey = mk;
+  addNewsItem(`월급 입금 ${formatWon(MONTHLY_SALARY)} (매월 1일 자동)`, "salary", "", {
+    global: true,
+  });
+  setMessage(`월급 ${formatWon(MONTHLY_SALARY)}이 입금되었습니다.`, "ok");
+  schedulePersistUser();
+}
+
+function matchesMainNewsFilter(it) {
+  if (!it || it.global) return true;
+  if (!it.stockId) return false;
+  const hold = (game.holdings[it.stockId] ?? 0) > 0;
+  const watch = watchlistIds.includes(it.stockId);
+  return hold || watch;
 }
 
 function syncTradeButtons() {
-  const canTrade = isTradingWindowActive();
+  const canTrade = isTradingWindowActive() && !isTradeBlockedByPenalty();
   ["detailBtnBuy", "detailBtnSell"].forEach((id) => {
     const el = document.getElementById(id);
     if (el) {
@@ -408,6 +429,7 @@ function syncTradeButtons() {
 
 function renderLifeStatus() {
   renderProfileDisplay();
+  renderLifeTab();
 }
 
 /** 다음날 08:00 프리마켓 진입 직후 UI (시초가 갭은 09:00에 적용) */
@@ -433,7 +455,9 @@ function finishRollToPreMarketDay() {
   const { month, day } = getCalendarParts(gameDayIndex);
   addNewsItem(
     `${month}월 ${day}일 08:00 — 장 시작 전 · 프리마켓 뉴스를 확인하세요 (09:00 시초가 갭)`,
-    "news"
+    "news",
+    "",
+    { global: true }
   );
 
   if (!onlineMode) {
@@ -444,10 +468,6 @@ function finishRollToPreMarketDay() {
   schedulePersistUser();
   syncNextTurnButton();
   syncTradeButtons();
-}
-
-function scheduleNextLifeEventDay() {
-  lifeNextEventDayIndex = gameDayIndex + 2 + Math.floor(Math.random() * 4);
 }
 
 function isTutorialDone() {
@@ -540,147 +560,99 @@ function routeOnboardingScreens() {
   startGameClockFromInit(false);
 }
 
-function syncJobScheduleSelectionFromProfile() {
+function renderLifeTab() {
+  const salaryEl = document.getElementById("lifeSalaryInfo");
+  const lockEl = document.getElementById("lifeTradeLockHint");
+  const btn = document.getElementById("btnEmergencyHanRiver");
   const ctx = getMonthContextForDayIndex(gameDayIndex);
-  const mk = ctx.monthKey;
-  const committed = playerProfile.jobCommitByMonth?.[mk];
-  jobScheduleSelectedDays = new Set();
-  if (committed && Array.isArray(committed.days)) {
-    committed.days.forEach((d) => jobScheduleSelectedDays.add(d));
+  if (salaryEl) {
+    salaryEl.textContent = `매월 1일 자동 입금 ${formatWon(
+      MONTHLY_SALARY
+    )} · 이번 달 키: ${ctx.monthKey}`;
   }
-}
-
-function updateJobScheduleSummary() {
-  const summary = document.getElementById("jobScheduleSummary");
-  const hint = document.getElementById("jobSchedulePenaltyHint");
-  const ctx = getMonthContextForDayIndex(gameDayIndex);
-  const mk = ctx.monthKey;
-  const n = jobScheduleSelectedDays.size;
-  const pay = n * JOB_PAY_PER_DAY;
-  const committed = playerProfile.jobCommitByMonth?.[mk];
-  if (summary) {
-    if (committed) {
-      summary.textContent = `확정됨: ${committed.count}일 · 총 ${formatWon(
-        committed.count * JOB_PAY_PER_DAY
-      )} 지급 완료${committed.overwork ? " · 과로 경고 적용됨" : ""}`;
+  const blocked = isTradeBlockedByPenalty();
+  if (lockEl) {
+    if (blocked && game.tradeBlockedUntilMs) {
+      const left = Math.max(0, game.tradeBlockedUntilMs - Date.now());
+      const m = Math.floor(left / 60000);
+      const s = Math.floor((left % 60000) / 1000);
+      lockEl.hidden = false;
+      lockEl.textContent = `매매 잠금 중 · 약 ${m}분 ${s}초 남음 (차트·호가는 실시간)`;
     } else {
-      summary.textContent = `선택 ${n}일 · 예상 급여 ${formatWon(pay)} (확정 시 일시 지급)`;
+      lockEl.hidden = true;
+      lockEl.textContent = "";
     }
-  }
-  if (hint) {
-    if (hasJobFatigue()) {
-      hint.hidden = false;
-      hint.textContent =
-        "피로 누적: 뉴스가 늦게 표시되고 일부 문구가 흐릿합니다. 매매 시 추가 부담이 붙습니다.";
-    } else if (!committed && n >= JOB_OVERWORK_DAYS) {
-      hint.hidden = false;
-      hint.textContent = `선택 ${n}일: 확정 시 당분간 뉴스 지연·추가 매매 부담이 적용됩니다.`;
-    } else {
-      hint.hidden = true;
-      hint.textContent = "";
-    }
-  }
-}
-
-function renderJobScheduleUi() {
-  const label = document.getElementById("jobScheduleMonthLabel");
-  const row = document.getElementById("jobScheduleWeekdayRow");
-  const cal = document.getElementById("jobScheduleCalendar");
-  const btn = document.getElementById("btnJobScheduleConfirm");
-  if (!label || !cal) return;
-  const ctx = getMonthContextForDayIndex(gameDayIndex);
-  const mk = ctx.monthKey;
-  label.textContent = `${ctx.y}년 ${ctx.m}월 (게임 캘린더)`;
-  if (row) {
-    row.innerHTML = ["일", "월", "화", "수", "목", "금", "토"]
-      .map((d) => `<span>${d}</span>`)
-      .join("");
-  }
-  syncJobScheduleSelectionFromProfile();
-  const committed = playerProfile.jobCommitByMonth?.[mk];
-  cal.innerHTML = "";
-  for (let i = 0; i < ctx.padSun; i += 1) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "job-schedule-day is-muted";
-    b.disabled = true;
-    b.setAttribute("aria-hidden", "true");
-    cal.appendChild(b);
-  }
-  for (let d = 1; d <= ctx.daysInMonth; d += 1) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "job-schedule-day";
-    b.dataset.day = String(d);
-    b.textContent = String(d);
-    if (jobScheduleSelectedDays.has(d)) b.classList.add("is-selected");
-    if (committed) {
-      b.disabled = true;
-      b.classList.add("is-muted");
-    }
-    cal.appendChild(b);
   }
   if (btn) {
-    btn.disabled = !!committed;
-    btn.textContent = committed ? "이번 달 스케줄 확정됨" : "이번 달 스케줄 확정하기";
+    const poor = game.cash < EMERGENCY_JOB_CASH_THRESHOLD;
+    btn.disabled = !onlineMode || !sb || !loginDisplayName || blocked || !poor;
+    btn.title = !poor
+      ? `예수금이 ${formatWon(EMERGENCY_JOB_CASH_THRESHOLD)} 미만일 때 이용할 수 있습니다.`
+      : blocked
+        ? "잠금이 풀린 뒤 이용할 수 있습니다."
+        : "급전을 받고 일정 시간 매매가 제한됩니다.";
   }
-  updateJobScheduleSummary();
 }
 
-function onConfirmJobSchedule() {
-  const ctx = getMonthContextForDayIndex(gameDayIndex);
-  const mk = ctx.monthKey;
-  if (playerProfile.jobCommitByMonth?.[mk]) {
-    setMessage("이미 확정된 달입니다.", "err");
+async function onEmergencyHanRiverClick() {
+  if (!onlineMode || !sb || !loginDisplayName) {
+    setMessage("Supabase 연결이 필요합니다.", "err");
     return;
   }
-  const n = jobScheduleSelectedDays.size;
-  if (n <= 0) {
-    setMessage("알바할 날짜를 하나 이상 선택하세요.", "err");
+  if (isTradeBlockedByPenalty()) {
+    setMessage("이미 매매 잠금 중입니다.", "err");
     return;
   }
-  const days = Array.from(jobScheduleSelectedDays).sort((a, b) => a - b);
-  const pay = n * JOB_PAY_PER_DAY;
-  const overwork = n >= JOB_OVERWORK_DAYS;
-  game.cash += pay;
-  if (!playerProfile.jobCommitByMonth) playerProfile.jobCommitByMonth = {};
-  playerProfile.jobCommitByMonth[mk] = { count: n, days, overwork };
-  if (overwork) {
-    jobFatigueUntilDayIndex = firstDayIndexOfNextMonth(gameDayIndex);
+  if (game.cash >= EMERGENCY_JOB_CASH_THRESHOLD) {
+    setMessage("예수금이 충분할 때는 이용할 수 없습니다.", "err");
+    return;
   }
-  setMessage(
-    overwork
-      ? `알바 ${n}일 확정 · ${formatWon(pay)} 지급. 과로로 뉴스·매매에 불이익이 당분간 적용됩니다.`
-      : `알바 ${n}일 확정 · ${formatWon(pay)} 지급.`,
-    "ok"
-  );
+  const { data, error } = await sb.rpc("emergency_han_river_job", {
+    p_login_name: loginDisplayName,
+  });
+  if (error) {
+    setMessage(error.message || "급전 요청 실패", "err");
+    return;
+  }
+  if (!data?.ok) {
+    setMessage(data?.reason || "급전 실패", "err");
+    return;
+  }
+  game.cash = Number(data.cash);
+  game.tradeBlockedUntilMs = Number(data.trade_blocked_until_ms) || 0;
   renderAssetSummary();
   schedulePersistUser();
-  renderJobScheduleUi();
+  syncTradeButtons();
+  ensureTradeLockPolling();
+  renderLifeTab();
+  addNewsItem(
+    `한강물 온도 재기 알바 완료 · 급전 ${formatWon(
+      Number(data.bonus) || 0
+    )} 입금. ${Math.round(EMERGENCY_LOCK_MS / 60000)}분간 매매가 제한됩니다.`,
+    "life",
+    "",
+    { global: true }
+  );
+  setMessage(
+    `급전 입금 · ${Math.round(EMERGENCY_LOCK_MS / 60000)}분간 매매가 잠깁니다. 차트는 계속 확인하세요.`,
+    "ok"
+  );
 }
 
 function bindLifeUi() {
-  const cal = document.getElementById("jobScheduleCalendar");
-  const btn = document.getElementById("btnJobScheduleConfirm");
-  if (cal && cal.dataset.bound !== "1") {
-    cal.dataset.bound = "1";
-    cal.addEventListener("click", (e) => {
-      const t = e.target.closest(".job-schedule-day");
-      if (!t || t.disabled || t.classList.contains("is-muted")) return;
-      const day = Number(t.dataset.day);
-      if (!Number.isFinite(day)) return;
-      const mk = getMonthContextForDayIndex(gameDayIndex).monthKey;
-      if (playerProfile.jobCommitByMonth?.[mk]) return;
-      if (jobScheduleSelectedDays.has(day)) jobScheduleSelectedDays.delete(day);
-      else jobScheduleSelectedDays.add(day);
-      t.classList.toggle("is-selected", jobScheduleSelectedDays.has(day));
-      updateJobScheduleSummary();
-    });
-  }
+  const btn = document.getElementById("btnEmergencyHanRiver");
   if (btn && btn.dataset.bound !== "1") {
     btn.dataset.bound = "1";
-    btn.addEventListener("click", () => onConfirmJobSchedule());
+    btn.addEventListener("click", () => {
+      onEmergencyHanRiverClick().catch((e) => console.warn(e));
+    });
   }
+  renderLifeTab();
+}
+
+/** @deprecated 호환용 — 탭 전환 시 동일 */
+function renderJobScheduleUi() {
+  renderLifeTab();
 }
 
 // ----- Supabase: 유저 동기화 (LocalStorage 제거) -----
@@ -785,27 +757,18 @@ async function loadUserFromServer() {
   game.age = row.sim_age ?? 25;
   game.cash = Number(row.cash);
   game.initialCapital = Number(row.initial_capital) || INITIAL_CAPITAL;
+  game.tradeBlockedUntilMs = Number(row.trade_blocked_until_ms) || 0;
 
   const prof = row.profile && typeof row.profile === "object" ? row.profile : {};
   playerProfile.name = typeof prof.name === "string" ? prof.name : nm;
   playerProfile.age = typeof prof.age === "number" ? prof.age : 20;
   playerProfile.birthday = typeof prof.birthday === "string" ? prof.birthday : "";
   playerProfile.setupComplete = !!prof.setupComplete;
-  playerProfile.jobCommitByMonth =
-    prof.jobCommitByMonth && typeof prof.jobCommitByMonth === "object"
-      ? prof.jobCommitByMonth
-      : {};
-  if (typeof prof.jobFatigueUntilDayIndex === "number") {
-    jobFatigueUntilDayIndex = prof.jobFatigueUntilDayIndex;
-  } else {
-    jobFatigueUntilDayIndex = 0;
-  }
+  playerProfile.lastSalaryMonthKey =
+    typeof prof.lastSalaryMonthKey === "string" ? prof.lastSalaryMonthKey : "";
   watchlistIds = Array.isArray(prof.watchlist)
     ? prof.watchlist.filter((id) => STOCK_SPECS.some((s) => s.id === id))
     : [];
-  if (typeof prof.nextLifeEventDayIndex === "number") {
-    lifeNextEventDayIndex = prof.nextLifeEventDayIndex;
-  }
 
   const { data: ports } = await sb
     .from(TBL_PORTFOLIOS)
@@ -821,11 +784,11 @@ async function loadUserFromServer() {
     game.holdings[p.symbol] = Number(p.shares);
     game.costBasis[p.symbol] = Number(p.avg_cost);
   });
-  if (jobFatigueUntilDayIndex > 0 && gameDayIndex >= jobFatigueUntilDayIndex) {
-    jobFatigueUntilDayIndex = 0;
-  }
   renderPlayerLoginBadge();
   renderJobScheduleUi();
+  ensureTradeLockPolling();
+  maybeApplyMonthlySalary();
+  renderNewsFeedFromServer(serverNewsFeedItems);
 }
 
 function maybePayDividendFromServerTick(prev, next) {
@@ -848,36 +811,27 @@ function renderNewsFeedFromServer(items) {
   if (!list || !Array.isArray(items)) return;
   clearNewsFeedRevealTimers();
   list.innerHTML = "";
-  const arr = items.slice(0, MAX_NEWS_ITEMS);
-  const fatigue = hasJobFatigue();
-  arr.forEach((it, index) => {
-    const delay = fatigue ? Math.min(9000, 900 + index * 550) : 0;
-    const blur = fatigue && (index % 3 !== 1 || Math.random() < 0.4);
-    const show = () => {
-      const li = document.createElement("li");
-      li.className = `news-item news-${it.type || "news"}`;
-      const timeEl = document.createElement("span");
-      timeEl.className = "news-time";
-      const d = new Date(it.ts || Date.now());
-      timeEl.textContent = d.toLocaleTimeString("ko-KR", {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      });
-      const textEl = document.createElement("span");
-      textEl.className = "news-text" + (blur ? " news-text--fatigue" : "");
-      textEl.textContent = it.text || "";
-      li.appendChild(timeEl);
-      li.appendChild(textEl);
-      list.appendChild(li);
-    };
-    if (delay > 0) {
-      const tid = setTimeout(show, delay);
-      newsFeedRevealTimers.push(tid);
-    } else {
-      show();
-    }
+  const arr = items.filter(matchesMainNewsFilter).slice(0, MAX_NEWS_ITEMS);
+  arr.forEach((it) => {
+    const li = document.createElement("li");
+    li.className = `news-item news-${it.type || "news"}`;
+    if (it.stockId) li.dataset.stockId = it.stockId;
+    const timeEl = document.createElement("span");
+    timeEl.className = "news-time";
+    const d = new Date(it.ts || Date.now());
+    timeEl.textContent = d.toLocaleTimeString("ko-KR", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    const textEl = document.createElement("span");
+    textEl.className = "news-text";
+    textEl.textContent = it.text || "";
+    li.appendChild(timeEl);
+    li.appendChild(textEl);
+    list.appendChild(li);
   });
+  if (selectedStockId) renderDetailStockNewsSection();
 }
 
 function applyServerMarketState(m) {
@@ -889,10 +843,7 @@ function applyServerMarketState(m) {
   lastMarketSnapshotForDividend = JSON.parse(JSON.stringify(m));
 
   gameDayIndex = m.gameDayIndex ?? 0;
-  if (jobFatigueUntilDayIndex > 0 && gameDayIndex >= jobFatigueUntilDayIndex) {
-    jobFatigueUntilDayIndex = 0;
-    schedulePersistUser();
-  }
+  maybeApplyMonthlySalary();
   gameMinutes = m.gameMinutes ?? MARKET_OPEN_MIN;
   awaitingDayRoll = !!m.awaitingDayRoll;
   const gm0 = m.gameMinutes ?? MARKET_OPEN_MIN;
@@ -975,6 +926,9 @@ function applyServerMarketState(m) {
           ts: it.ts || new Date().toISOString(),
           text: it.text || "",
           type: it.type || "news",
+          stockId: it.stockId,
+          global: it.global === true,
+          subline: it.subline,
         }))
         .slice(0, MAX_NEWS_ITEMS)
     : [];
@@ -1039,7 +993,14 @@ function serializeMarketState() {
     candleHistory: ch,
     sessionOpenPrice: { ...sessionOpenPrice },
     candleOhlcBuffer: JSON.parse(JSON.stringify(candleOhlcBuffer)),
-    newsFeed: serverNewsFeedItems.slice(0, MAX_NEWS_ITEMS),
+    newsFeed: serverNewsFeedItems.slice(0, MAX_NEWS_ITEMS).map((it) => ({
+      ts: it.ts,
+      text: it.text,
+      type: it.type,
+      stockId: it.stockId,
+      global: it.global === true,
+      subline: it.subline,
+    })),
   };
 }
 
@@ -1091,7 +1052,9 @@ function closeMarketOnline() {
   awaitingDayRoll = true;
   isMarketClosed = true;
   gameMinutes = MARKET_CLOSE_MIN;
-  addNewsItem("장 마감 — 오늘의 거래가 종료되었습니다.", "close");
+  addNewsItem("장 마감 — 오늘의 거래가 종료되었습니다.", "close", "", {
+    global: true,
+  });
   const pauseBtn = document.getElementById("btnPause");
   if (pauseBtn) {
     pauseBtn.disabled = true;
@@ -1119,10 +1082,13 @@ function openNextTradingDayOnline() {
   });
   ensureCalendarHorizon();
   fireDueCalendarEvents();
+  maybeApplyMonthlySalary();
   const { month, day } = getCalendarParts(gameDayIndex);
   addNewsItem(
     `${month}월 ${day}일 08:00 — 장 시작 전 · 프리마켓 뉴스를 확인하세요`,
-    "news"
+    "news",
+    "",
+    { global: true }
   );
   const pauseBtn = document.getElementById("btnPause");
   if (pauseBtn) {
@@ -1280,6 +1246,7 @@ function subscribeMarketRealtime() {
           syncNextTurnButton();
           syncTradeButtons();
           updatePremarketChartOverlay();
+          updateDetailTradeLivePreview();
         } catch (e) {
           console.warn("market_state handler", e);
         }
@@ -1328,7 +1295,7 @@ async function persistUserNow() {
       hp: 100,
       stress: 0,
       sim_age: game.age,
-      trade_blocked_until_ms: 0,
+      trade_blocked_until_ms: Math.max(0, Math.floor(game.tradeBlockedUntilMs || 0)),
       initial_capital: game.initialCapital,
       profile: {
         name: playerProfile.name,
@@ -1336,9 +1303,7 @@ async function persistUserNow() {
         birthday: playerProfile.birthday,
         setupComplete: playerProfile.setupComplete,
         watchlist: watchlistIds,
-        nextLifeEventDayIndex: lifeNextEventDayIndex,
-        jobCommitByMonth: playerProfile.jobCommitByMonth || {},
-        jobFatigueUntilDayIndex,
+        lastSalaryMonthKey: playerProfile.lastSalaryMonthKey || "",
       },
       updated_at: new Date().toISOString(),
     })
@@ -1818,7 +1783,9 @@ function releasePremarketNewsForMinute(minute) {
   if (!batch || batch.length === 0) return;
   batch.forEach((ev) => {
     const type = ev.positive ? "premarket-pos" : "premarket-neg";
-    addNewsItem(buildPremarketHeadline(ev.stockId, ev.positive), type);
+    addNewsItem(buildPremarketHeadline(ev.stockId, ev.positive), type, "", {
+      stockId: ev.stockId,
+    });
   });
 }
 
@@ -1873,7 +1840,9 @@ function applyOpeningGapFromPremarket() {
 
   addNewsItem(
     `09:00 시초가 갭 반영 — Net Impact 요약: ${summaryBits.join(" · ")}`,
-    "premarket-open"
+    "premarket-open",
+    "",
+    { global: true }
   );
   setMessage("09:00 개장 — 프리마켓 뉴스가 시초가에 반영되었습니다.", "ok");
   triggerGapOpenAnimation();
@@ -2090,16 +2059,16 @@ function stockEvalProfit() {
   return { eval: ev, cost, pl: ev - cost };
 }
 
-async function buyStock(stockId, quantity) {
+async function buyStock(stockId, quantityRaw, mode = "shares") {
   if (tutorialGateActive) {
     return { ok: false, reason: "튜토리얼을 먼저 완료해 주세요." };
   }
   if (!onlineMode || !sb || !loginDisplayName) {
     return { ok: false, reason: "Supabase 연결이 필요합니다. config.js를 확인하세요." };
   }
-  const q = Math.floor(Number(quantity));
-  if (!Number.isFinite(q) || q <= 0) {
-    return { ok: false, reason: "수량은 1 이상의 정수여야 합니다." };
+  const q = computeTradeQtyFromInput(stockId, "buy", quantityRaw, mode);
+  if (!q || q <= 0) {
+    return { ok: false, reason: "수량·금액을 올바르게 입력해 주세요." };
   }
   const stock = getStockById(stockId);
   if (!stock) return { ok: false, reason: "존재하지 않는 종목입니다." };
@@ -2117,27 +2086,20 @@ async function buyStock(stockId, quantity) {
   }
   game.cash = Number(data.cash);
   await loadUserFromServer();
-  if (hasJobFatigue()) {
-    const extra = Math.round(stock.price * q * FATIGUE_EXTRA_FEE_RATE);
-    if (extra > 0) {
-      game.cash = Math.max(0, game.cash - extra);
-      setMessage(`피로 누적 추가 부담 ${formatWon(extra)}`, "err");
-    }
-  }
   schedulePersistUser();
   return { ok: true };
 }
 
-async function sellStock(stockId, quantity) {
+async function sellStock(stockId, quantityRaw, mode = "shares") {
   if (tutorialGateActive) {
     return { ok: false, reason: "튜토리얼을 먼저 완료해 주세요." };
   }
   if (!onlineMode || !sb || !loginDisplayName) {
     return { ok: false, reason: "Supabase 연결이 필요합니다. config.js를 확인하세요." };
   }
-  const q = Math.floor(Number(quantity));
-  if (!Number.isFinite(q) || q <= 0) {
-    return { ok: false, reason: "수량은 1 이상의 정수여야 합니다." };
+  const q = computeTradeQtyFromInput(stockId, "sell", quantityRaw, mode);
+  if (!q || q <= 0) {
+    return { ok: false, reason: "수량·금액을 올바르게 입력해 주세요." };
   }
   const stock = getStockById(stockId);
   if (!stock) return { ok: false, reason: "존재하지 않는 종목입니다." };
@@ -2155,14 +2117,6 @@ async function sellStock(stockId, quantity) {
   }
   game.cash = Number(data.cash);
   await loadUserFromServer();
-  if (hasJobFatigue()) {
-    const gross = Math.round(stock.price * q);
-    const extra = Math.round(gross * FATIGUE_EXTRA_FEE_RATE);
-    if (extra > 0) {
-      game.cash = Math.max(0, game.cash - extra);
-      setMessage(`피로 누적 추가 부담 ${formatWon(extra)}`, "err");
-    }
-  }
   schedulePersistUser();
   return { ok: true };
 }
@@ -2231,7 +2185,9 @@ function payDividends() {
   if (total <= 0) return;
 
   game.cash += Math.round(total);
-  addNewsItem(`배당금 입금 완료 · ${formatWon(total)}`, "dividend");
+  addNewsItem(`배당금 입금 완료 · ${formatWon(total)}`, "dividend", "", {
+    global: true,
+  });
   renderAssetSummary();
 }
 
@@ -2616,6 +2572,142 @@ function refreshDetailChart() {
     true
   );
   updateOrderBookAndStrength(id);
+  updateDetailTradeLivePreview();
+}
+
+function computeTradeQtyFromInput(stockId, action, rawInput, mode) {
+  const s = getStockById(stockId);
+  if (!s || s.price <= 0) return 0;
+  const clean = String(rawInput ?? "").replace(/,/g, "").trim();
+  if (mode === "won") {
+    const won = parseFloat(clean);
+    if (!Number.isFinite(won) || won <= 0) return 0;
+    if (action === "buy") {
+      const cap = Math.min(won, game.cash);
+      return roundShareQty(cap / s.price);
+    }
+    const sh = game.holdings[stockId] ?? 0;
+    const maxWon = sh * s.price;
+    const use = Math.min(won, maxWon);
+    return roundShareQty(use / s.price);
+  }
+  const q = roundShareQty(parseFloat(clean));
+  if (!q || q <= 0) return 0;
+  if (action === "sell") {
+    const sh = game.holdings[stockId] ?? 0;
+    if (q > sh + 1e-8) return roundShareQty(sh);
+  }
+  return q;
+}
+
+function renderDetailStockNewsSection() {
+  const ul = document.getElementById("detailStockNewsList");
+  if (!ul || !selectedStockId) return;
+  const id = selectedStockId;
+  const items = serverNewsFeedItems.filter((it) => it.stockId === id);
+  ul.innerHTML = "";
+  if (items.length === 0) {
+    const li = document.createElement("li");
+    li.className = "detail-news-empty";
+    li.textContent = "이 종목 관련 속보가 아직 없습니다.";
+    ul.appendChild(li);
+    return;
+  }
+  items.slice(0, 40).forEach((it) => {
+    const li = document.createElement("li");
+    li.className = "detail-news-item";
+    const d = new Date(it.ts || Date.now());
+    const timeEl = document.createElement("time");
+    timeEl.className = "detail-news-time";
+    timeEl.textContent = d.toLocaleString("ko-KR", {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    const p = document.createElement("p");
+    p.className = "detail-news-text";
+    p.textContent = it.text || "";
+    li.appendChild(timeEl);
+    li.appendChild(p);
+    ul.appendChild(li);
+  });
+}
+
+function updateDetailTradeLivePreview() {
+  const wrap = document.getElementById("detailTradePreview");
+  const inp = document.getElementById("detailQtyInput");
+  if (!wrap || !inp || !selectedStockId) return;
+  const s = getStockById(selectedStockId);
+  if (!s) return;
+  const qty = computeTradeQtyFromInput(
+    selectedStockId,
+    lastDetailTradeAction,
+    inp.value,
+    detailTradeInputMode
+  );
+  const avgEl = document.getElementById("detailPreviewAvg");
+  const plEl = document.getElementById("detailPreviewPl");
+  const wtEl = document.getElementById("detailPreviewWeight");
+  if (!qty || qty <= 0) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  const sh = game.holdings[selectedStockId] ?? 0;
+  const cb = game.costBasis[selectedStockId] ?? 0;
+  const P = s.price;
+
+  if (lastDetailTradeAction === "buy") {
+    const cost = Math.round(P * qty);
+    const newSh = sh + qty;
+    const newCb = cb + cost;
+    const newAvg = newSh > 0 ? newCb / newSh : 0;
+    const newStockVal = newSh * P;
+    const oldStockVal = sh * P;
+    const hypNw = netWorth() - oldStockVal + newStockVal - cost;
+    const pl = newStockVal - newCb;
+    const pct = newCb > 0 ? ((newStockVal - newCb) / newCb) * 100 : 0;
+    if (avgEl) avgEl.textContent = formatWon(Math.round(newAvg));
+    if (plEl) {
+      plEl.textContent = `${pl >= 0 ? "+" : ""}${formatWon(Math.round(pl))} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`;
+      plEl.className = `detail-preview-pl ${
+        pl > 0 ? "value-up" : pl < 0 ? "value-down" : "value-neutral"
+      }`;
+    }
+    if (wtEl) {
+      const w = hypNw > 0 ? (newStockVal / hypNw) * 100 : 0;
+      wtEl.textContent = `${w.toFixed(1)}%`;
+      wtEl.className = `detail-preview-wt ${
+        w >= 0 ? "value-neutral" : "value-neutral"
+      }`;
+    }
+  } else {
+    const sellQty = Math.min(qty, sh);
+    const propCost = sh > 0 ? (cb * sellQty) / sh : 0;
+    const gain = sellQty * P - propCost;
+    const newSh = sh - sellQty;
+    const newCb = cb - propCost;
+    const newAvg = newSh > 1e-8 ? newCb / newSh : 0;
+    const newStockVal = Math.max(0, newSh * P);
+    const oldStockVal = sh * P;
+    const g = Math.round(P * sellQty);
+    const hypNw = netWorth() - oldStockVal + newStockVal + g;
+    if (avgEl) {
+      avgEl.textContent =
+        newSh < 1e-8 ? "—" : formatWon(Math.round(newAvg));
+    }
+    if (plEl) {
+      plEl.textContent = `${gain >= 0 ? "+" : ""}${formatWon(Math.round(gain))} (이번 매도)`;
+      plEl.className = `detail-preview-pl ${
+        gain > 0 ? "value-up" : gain < 0 ? "value-down" : "value-neutral"
+      }`;
+    }
+    if (wtEl) {
+      const w = hypNw > 0 ? (newStockVal / hypNw) * 100 : 0;
+      wtEl.textContent = newSh < 1e-8 ? "0%" : `${w.toFixed(1)}%`;
+    }
+  }
 }
 
 function triggerNewsShake() {
@@ -2627,56 +2719,28 @@ function triggerNewsShake() {
   setTimeout(() => app.classList.remove("screen-shake"), 450);
 }
 
-function addNewsItem(text, type = "news", subline = "") {
+function addNewsItem(text, type = "news", subline = "", meta = {}) {
+  const item = {
+    ts: new Date().toISOString(),
+    text,
+    type: type || "news",
+    subline: subline || "",
+    stockId: meta.stockId,
+    global: meta.global === true,
+  };
   if (onlineMode && onlineLeaderSimulating) {
-    serverNewsFeedItems.unshift({
-      ts: new Date().toISOString(),
-      text,
-      type: type || "news",
-    });
+    serverNewsFeedItems.unshift(item);
     while (serverNewsFeedItems.length > MAX_NEWS_ITEMS) {
       serverNewsFeedItems.pop();
     }
     return;
   }
 
-  const list = document.getElementById("newsFeed");
-  if (!list) return;
-
-  const li = document.createElement("li");
-  li.className = `news-item news-${type}`;
-
-  const time = new Date();
-  const ts = time.toLocaleTimeString("ko-KR", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-
-  const timeEl = document.createElement("span");
-  timeEl.className = "news-time";
-  timeEl.textContent = ts;
-
-  const textEl = document.createElement("span");
-  textEl.className = "news-text";
-  textEl.textContent = text;
-
-  li.appendChild(timeEl);
-  li.appendChild(textEl);
-
-  if (subline) {
-    const sub = document.createElement("span");
-    sub.className = "news-impact-tag";
-    sub.textContent = subline;
-    li.appendChild(sub);
+  serverNewsFeedItems.unshift(item);
+  while (serverNewsFeedItems.length > MAX_NEWS_ITEMS) {
+    serverNewsFeedItems.pop();
   }
-
-  list.insertBefore(li, list.firstChild);
-
-  while (list.children.length > MAX_NEWS_ITEMS) {
-    list.removeChild(list.lastChild);
-  }
-
+  renderNewsFeedFromServer(serverNewsFeedItems);
   triggerNewsShake();
 }
 
@@ -2689,7 +2753,7 @@ function tryFireChainNews(completedCandleCount) {
     if (completedCandleCount !== sched[step]) return;
 
     const story = NEWS_CHAINS[stockId][step];
-    addNewsItem(story.headline, "chain");
+    addNewsItem(story.headline, "chain", "", { stockId });
     applyNewsPayload(story);
     chainStepByStock[stockId] += 1;
     newsCountByStock[stockId] += 1;
@@ -2730,7 +2794,7 @@ function scheduleAmbientNewsTimer() {
           AMBIENT_NEWS_TEMPLATES[
             Math.floor(Math.random() * AMBIENT_NEWS_TEMPLATES.length)
           ];
-        addNewsItem(tpl(s.name), "ambient");
+        addNewsItem(tpl(s.name), "ambient", "", { stockId: sid });
       }
     }
     if (shouldAdvanceMarketClock()) scheduleAmbientNewsTimer();
@@ -2846,7 +2910,9 @@ function startGameClockFromInit(loaded) {
     } else if (!loaded) {
       addNewsItem(
         "시장 개장 · 현실 1초=장내 1분, 10분봉은 현실 10초마다 확정",
-        "news"
+        "news",
+        "",
+        { global: true }
       );
       onSessionSecondTick();
       startGameClockTimer();
@@ -2919,6 +2985,8 @@ function toggleWatchlist(stockId) {
   schedulePersistUser();
   renderStockListMain();
   updateDetailWatchlistButton();
+  renderNewsFeedFromServer(serverNewsFeedItems);
+  if (selectedStockId) renderDetailStockNewsSection();
 }
 
 function updateDetailWatchlistButton() {
@@ -3045,6 +3113,9 @@ function openStockDetail(stockId) {
   updateDetailWatchlistButton();
   updatePremarketChartOverlay();
   updateOrderBookAndStrength(stockId);
+  syncDetailQtyLabel();
+  updateDetailTradeLivePreview();
+  renderDetailStockNewsSection();
 }
 
 function closeStockDetail() {
@@ -3055,6 +3126,13 @@ function closeStockDetail() {
   const det = document.getElementById("stockDetailView");
   if (list) list.hidden = false;
   if (det) det.hidden = true;
+}
+
+function syncDetailQtyLabel() {
+  const lab = document.getElementById("detailQtyLabel");
+  if (!lab) return;
+  lab.textContent =
+    detailTradeInputMode === "won" ? "금액(원)" : "수량(주)";
 }
 
 function bindDetailTrade() {
@@ -3068,39 +3146,119 @@ function bindDetailTrade() {
     });
   }
 
+  document.querySelectorAll("[data-detail-qty-mode]").forEach((btn) => {
+    if (btn.dataset.bound === "1") return;
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", () => {
+      const m = btn.getAttribute("data-detail-qty-mode");
+      if (m !== "shares" && m !== "won") return;
+      detailTradeInputMode = m;
+      document.querySelectorAll("[data-detail-qty-mode]").forEach((b) => {
+        b.classList.toggle("is-active", b.getAttribute("data-detail-qty-mode") === m);
+      });
+      syncDetailQtyLabel();
+      updateDetailTradeLivePreview();
+    });
+  });
+
   const buyBtn = document.getElementById("detailBtnBuy");
   const sellBtn = document.getElementById("detailBtnSell");
   const qtyInput = document.getElementById("detailQtyInput");
+  const maxBuyBtn = document.getElementById("detailBtnMaxBuy");
+  const sellAllBtn = document.getElementById("detailBtnSellAll");
 
-    async function doTrade(action) {
+  async function doTrade(action) {
     const id = selectedStockId;
     if (!id || !qtyInput) return;
     if (tutorialGateActive) {
       setMessage("튜토리얼을 먼저 완료해 주세요.", "err");
       return;
     }
-    const qty = qtyInput.value;
+    lastDetailTradeAction = action;
+    const raw = qtyInput.value;
     const result =
-      action === "buy" ? await buyStock(id, qty) : await sellStock(id, qty);
+      action === "buy"
+        ? await buyStock(id, raw, detailTradeInputMode)
+        : await sellStock(id, raw, detailTradeInputMode);
     if (result.ok) {
+      const q = computeTradeQtyFromInput(id, action, raw, detailTradeInputMode);
+      const unit =
+        detailTradeInputMode === "won"
+          ? `${formatWon(Math.round(Number(raw) || 0))}어치`
+          : `${formatShares(q)}주`;
       setMessage(
         action === "buy"
-          ? `${id} ${qty}주 매수 완료.`
-          : `${id} ${qty}주 매도 완료.`,
+          ? `${id} 매수 완료 (${unit}).`
+          : `${id} 매도 완료 (${unit}).`,
         "ok"
       );
       renderAssetSummary();
       renderStocks();
       renderStockListMain();
       updateDetailPriceLine();
+      updateDetailTradeLivePreview();
       schedulePersistUser();
     } else {
       setMessage(result.reason, "err");
     }
   }
 
-  if (buyBtn) buyBtn.addEventListener("click", () => doTrade("buy"));
-  if (sellBtn) sellBtn.addEventListener("click", () => doTrade("sell"));
+  if (qtyInput) {
+    ["input", "change"].forEach((ev) =>
+      qtyInput.addEventListener(ev, () => updateDetailTradeLivePreview())
+    );
+  }
+
+  if (maxBuyBtn) {
+    maxBuyBtn.addEventListener("click", () => {
+      if (!selectedStockId) return;
+      const s = getStockById(selectedStockId);
+      if (!s || s.price <= 0) return;
+      lastDetailTradeAction = "buy";
+      detailTradeInputMode = "shares";
+      document.querySelectorAll("[data-detail-qty-mode]").forEach((b) => {
+        b.classList.toggle(
+          "is-active",
+          b.getAttribute("data-detail-qty-mode") === "shares"
+        );
+      });
+      syncDetailQtyLabel();
+      const q = roundShareQty((game.cash * 0.999) / s.price);
+      if (qtyInput) qtyInput.value = q > 0 ? String(q) : "0";
+      updateDetailTradeLivePreview();
+    });
+  }
+  if (sellAllBtn) {
+    sellAllBtn.addEventListener("click", () => {
+      if (!selectedStockId) return;
+      lastDetailTradeAction = "sell";
+      detailTradeInputMode = "shares";
+      document.querySelectorAll("[data-detail-qty-mode]").forEach((b) => {
+        b.classList.toggle(
+          "is-active",
+          b.getAttribute("data-detail-qty-mode") === "shares"
+        );
+      });
+      syncDetailQtyLabel();
+      const sh = game.holdings[selectedStockId] ?? 0;
+      if (qtyInput) qtyInput.value = sh > 0 ? String(sh) : "0";
+      updateDetailTradeLivePreview();
+    });
+  }
+
+  if (buyBtn) {
+    buyBtn.addEventListener("click", () => {
+      lastDetailTradeAction = "buy";
+      doTrade("buy");
+    });
+  }
+  if (sellBtn) {
+    sellBtn.addEventListener("click", () => {
+      lastDetailTradeAction = "sell";
+      doTrade("sell");
+    });
+  }
+  syncDetailQtyLabel();
   syncTradeButtons();
 }
 
@@ -3226,7 +3384,9 @@ function fireDueCalendarEvents() {
   scheduledEvents.forEach((ev) => {
     if (ev.fired || ev.dayIndex !== gameDayIndex) return;
     ev.fired = true;
-    addNewsItem(`[경제 일정] ${ev.title}`, "calendar");
+    addNewsItem(`[경제 일정] ${ev.title}`, "calendar", "", {
+      stockId: ev.targets?.[0],
+    });
     setMessage(`경제 일정 · ${ev.title}`, "ok");
     applyCalendarEventPayload(ev);
   });
@@ -3362,14 +3522,7 @@ function openNextTradingDay() {
   ensureCalendarHorizon();
   fireDueCalendarEvents();
 
-  if (gameDayIndex >= lifeNextEventDayIndex) {
-    const ev =
-      LIFE_RANDOM_EVENTS[Math.floor(Math.random() * LIFE_RANDOM_EVENTS.length)];
-    ev.apply();
-    addNewsItem(`[인생] ${ev.body}`, "life");
-    scheduleNextLifeEventDay();
-    schedulePersistUser();
-  }
+  maybeApplyMonthlySalary();
 
   finishRollToPreMarketDay();
 }
@@ -3395,7 +3548,9 @@ function closeMarket() {
   updateDetailPriceLine();
   updatePremarketChartOverlay();
 
-  addNewsItem("장 마감 — 오늘의 거래가 종료되었습니다.", "close");
+  addNewsItem("장 마감 — 오늘의 거래가 종료되었습니다.", "close", "", {
+    global: true,
+  });
   setMessage("장 마감 — 다음 거래일 08:00부터 프리마켓이 시작됩니다.", "ok");
 
   const pauseBtn = document.getElementById("btnPause");
@@ -3475,10 +3630,14 @@ function renderStocks() {
       </td>
       <td><span data-portfolio-price="${escapeHtml(s.id)}" class="watch-price">${formatWon(s.price)}</span></td>
       <td>${owned > 0 ? formatWon(avg) : "—"}</td>
-      <td>${owned.toLocaleString("ko-KR")}주</td>
+      <td>${owned > 0 ? formatShares(owned) : "—"}</td>
       <td class="${plCls}">${owned > 0 ? `${pl >= 0 ? "+" : ""}${formatWon(pl)}` : "—"}</td>
-      <td>
-        <input type="number" class="qty-input" min="1" value="1" data-stock="${escapeHtml(s.id)}" aria-label="${escapeHtml(s.name)} 수량" />
+      <td class="cell-qty-portfolio">
+        <input type="number" class="qty-input" min="0" step="any" value="1" data-stock="${escapeHtml(s.id)}" aria-label="${escapeHtml(s.name)} 수량" />
+        <div class="portfolio-qty-quick">
+          <button type="button" class="btn-mts ghost btn-qty-quick" data-portfolio-max="${escapeHtml(s.id)}">MAX</button>
+          <button type="button" class="btn-mts ghost btn-qty-quick" data-portfolio-sellall="${escapeHtml(s.id)}">전량</button>
+        </div>
       </td>
       <td class="cell-actions">
         <button type="button" class="btn-mts buy" data-action="buy" data-stock="${escapeHtml(s.id)}">매수</button>
@@ -3486,6 +3645,29 @@ function renderStocks() {
       </td>
     `;
     tbody.appendChild(tr);
+  });
+
+  tbody.querySelectorAll("[data-portfolio-max]").forEach((b) => {
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id = b.getAttribute("data-portfolio-max");
+      const st = getStockById(id);
+      const row = b.closest("tr");
+      const input = row?.querySelector(".qty-input");
+      if (!st || !input || st.price <= 0) return;
+      const q = roundShareQty((game.cash * 0.999) / st.price);
+      input.value = q > 0 ? String(q) : "0";
+    });
+  });
+  tbody.querySelectorAll("[data-portfolio-sellall]").forEach((b) => {
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id = b.getAttribute("data-portfolio-sellall");
+      const row = b.closest("tr");
+      const input = row?.querySelector(".qty-input");
+      const sh = game.holdings[id] ?? 0;
+      if (input) input.value = sh > 0 ? String(sh) : "0";
+    });
   });
 
   tbody.querySelectorAll("button[data-action]").forEach((btn) => {
@@ -3497,14 +3679,15 @@ function renderStocks() {
       const qty = input.value;
 
       let result;
-      if (action === "buy") result = await buyStock(id, qty);
-      else result = await sellStock(id, qty);
+      if (action === "buy") result = await buyStock(id, qty, "shares");
+      else result = await sellStock(id, qty, "shares");
 
       if (result.ok) {
+        const q = computeTradeQtyFromInput(id, action, qty, "shares");
         setMessage(
           action === "buy"
-            ? `${id} ${qty}주 매수 완료.`
-            : `${id} ${qty}주 매도 완료.`,
+            ? `${id} 매수 완료 (${formatShares(q)}주).`
+            : `${id} 매도 완료 (${formatShares(q)}주).`,
           "ok"
         );
         renderAssetSummary();
@@ -3614,10 +3797,8 @@ function initNewGame() {
   game.holdings = {};
   game.costBasis = {};
   game.initialCapital = INITIAL_CAPITAL;
-
-  jobFatigueUntilDayIndex = 0;
-  playerProfile.jobCommitByMonth = {};
-  scheduleNextLifeEventDay();
+  game.tradeBlockedUntilMs = 0;
+  playerProfile.lastSalaryMonthKey = "";
 
   stocks.forEach((s) => {
     s.price = randomInitialPrice();

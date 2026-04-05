@@ -1692,6 +1692,180 @@ body {
   }
 }
 
+/* ----- 종목 상세: 뉴스·매매 패널 확장 ----- */
+.detail-stock-news {
+  margin: 16px 0 12px;
+  padding: 14px 14px 10px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, rgba(0, 0, 0, 0.12) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.detail-stock-news__title {
+  margin: 0 0 10px;
+  font-size: 0.92rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.detail-stock-news__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.detail-news-item {
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.detail-news-item:last-child {
+  border-bottom: none;
+}
+
+.detail-news-time {
+  display: block;
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.45);
+  margin-bottom: 4px;
+}
+
+.detail-news-text {
+  margin: 0;
+  font-size: 0.86rem;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.detail-news-empty {
+  padding: 12px 0;
+  font-size: 0.85rem;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.detail-qty-mode-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.detail-qty-mode-btn {
+  flex: 1;
+  font-size: 0.82rem;
+  padding: 8px 10px;
+}
+
+.detail-qty-mode-btn.is-active {
+  border-color: rgba(49, 130, 246, 0.65);
+  background: rgba(49, 130, 246, 0.18);
+}
+
+.detail-trade-quick-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.detail-quick-btn {
+  flex: 1;
+  font-size: 0.78rem;
+  padding: 8px 6px;
+}
+
+.detail-trade-preview {
+  margin: 10px 0 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.detail-preview-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 0.82rem;
+  margin-bottom: 6px;
+}
+
+.detail-preview-row:last-child {
+  margin-bottom: 0;
+}
+
+.detail-preview-label {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.detail-preview-value,
+.detail-preview-pl,
+.detail-preview-wt {
+  font-weight: 700;
+  text-align: right;
+}
+
+.life-income-section .life-salary-info {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.88);
+  margin: 8px 0 12px;
+}
+
+.life-trade-lock-hint {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(251, 191, 36, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  font-size: 0.86rem;
+  color: #fde68a;
+}
+
+.life-emergency-card {
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.life-emergency-title {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.life-emergency-desc {
+  margin: 0 0 14px;
+  font-size: 0.86rem;
+  line-height: 1.5;
+  color: rgba(226, 232, 240, 0.88);
+}
+
+.cell-qty-portfolio {
+  vertical-align: middle;
+}
+
+.portfolio-qty-quick {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.btn-qty-quick {
+  font-size: 0.72rem;
+  padding: 4px 8px;
+}
+
+.news-feed--phone .news-item {
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
 @media (min-width: 720px) {
   .mts-app {
     max-width: 720px;

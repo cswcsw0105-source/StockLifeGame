@@ -90,11 +90,11 @@
           </li>
           <li>
             <span class="tutorial-step-emoji" aria-hidden="true">💼</span>
-            <strong>내 인생(알바):</strong> [내 인생] 탭에서 이번 달 알바 일정을 잡으면 시드머니가 들어옵니다.
+            <strong>내 인생:</strong> 매월 1일 월급이 자동 입금됩니다. 예수금이 부족하면 [내 인생]에서 한강 급전 알바를 이용할 수 있습니다(일정 시간 매매 잠금).
           </li>
           <li>
             <span class="tutorial-step-emoji" aria-hidden="true">🚨</span>
-            <strong>주의사항:</strong> 한 달에 알바를 너무 많이 잡으면 뉴스가 늦게 보이거나 매매 수수료가 올라갈 수 있습니다.
+            <strong>주의사항:</strong> 급전 알바 후에는 차트·호가는 계속 움직이지만 매매만 잠깁니다.
           </li>
         </ul>
         <button type="button" id="btnTutorialDismiss" class="btn-mts primary wide">
@@ -267,20 +267,64 @@
                 <p class="detail-orderbook-hint">호가는 시뮬레이션 · 체결강도는 현재가 방향 기준 랜덤</p>
                 <div class="orderbook-rows" id="detailOrderBookRows"></div>
               </div>
+              <section class="detail-stock-news" aria-label="종목 속보">
+                <h3 class="detail-stock-news__title">이 종목 속보</h3>
+                <ul id="detailStockNewsList" class="detail-stock-news__list"></ul>
+              </section>
               <div class="detail-trade-panel">
                 <div class="detail-trade-row">
                   <span class="detail-label">현재가</span>
                   <span id="detailCurrentPrice" class="detail-price"></span>
                 </div>
+                <div class="detail-qty-mode-row" role="group" aria-label="입력 방식">
+                  <button
+                    type="button"
+                    class="btn-mts ghost detail-qty-mode-btn is-active"
+                    data-detail-qty-mode="shares"
+                  >
+                    주 단위
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-mts ghost detail-qty-mode-btn"
+                    data-detail-qty-mode="won"
+                  >
+                    금액(원)
+                  </button>
+                </div>
                 <div class="detail-trade-row">
-                  <label class="detail-label" for="detailQtyInput">수량</label>
+                  <label class="detail-label" id="detailQtyLabel" for="detailQtyInput">수량(주)</label>
                   <input
                     type="number"
                     id="detailQtyInput"
                     class="qty-input detail-qty"
-                    min="1"
+                    min="0"
+                    step="any"
+                    inputmode="decimal"
                     value="1"
                   />
+                </div>
+                <div class="detail-trade-quick-row">
+                  <button type="button" id="detailBtnMaxBuy" class="btn-mts ghost detail-quick-btn">
+                    MAX (풀매수)
+                  </button>
+                  <button type="button" id="detailBtnSellAll" class="btn-mts ghost detail-quick-btn">
+                    전량 매도
+                  </button>
+                </div>
+                <div id="detailTradePreview" class="detail-trade-preview" hidden>
+                  <div class="detail-preview-row">
+                    <span class="detail-preview-label">예상 평단</span>
+                    <span id="detailPreviewAvg" class="detail-preview-value">—</span>
+                  </div>
+                  <div class="detail-preview-row">
+                    <span class="detail-preview-label">예상 손익</span>
+                    <span id="detailPreviewPl" class="detail-preview-pl value-neutral">—</span>
+                  </div>
+                  <div class="detail-preview-row">
+                    <span class="detail-preview-label">내 자산 대비 비중</span>
+                    <span id="detailPreviewWeight" class="detail-preview-wt value-neutral">—</span>
+                  </div>
                 </div>
                 <div class="detail-trade-actions">
                   <button type="button" id="detailBtnBuy" class="btn-mts buy wide">
@@ -310,7 +354,7 @@
               <section class="mts-section phone-news-inner">
                 <h2 class="phone-news-app-title">속보 피드</h2>
                 <p class="mts-section-desc phone-news-hint">
-                  종목별 하루 <strong>최대 3건</strong> · 문맥으로 읽어 보세요.
+                  <strong>관심 종목(☆)</strong> 또는 <strong>보유 종목</strong>·시장 전체 안내(월급·장 마감 등)만 표시됩니다. 종목별 하루 최대 3건 체이닝은 시장 탭에서 확인하세요.
                 </p>
                 <ul id="newsFeed" class="news-feed news-feed--phone" aria-live="polite"></ul>
               </section>
@@ -361,26 +405,22 @@
             hidden
             aria-labelledby="tab-btn-life"
           >
-            <section class="mts-section job-schedule-section">
-              <h2 class="mts-section-title">이번 달 알바 스케줄 짜기</h2>
-              <p class="job-schedule-warning" role="alert">
-                ⚠️ 너무 많은 날짜에 알바를 진행할 시 학업 혹은 주식 매매에 불이익을 겪을 수 있습니다.
-              </p>
+            <section class="mts-section life-income-section">
+              <h2 class="mts-section-title">소득 · 급전</h2>
               <p class="mts-section-desc">
-                달력에서 알바할 날짜를 눌러 선택하세요. 확정 시 선택한 일수에 비례해 시드머니가 지급됩니다.
+                게임 캘린더 <strong>매월 1일</strong>에 월급이 예수금으로 자동 입금됩니다. 속보 피드에도 알림이 뜹니다.
               </p>
-              <div id="jobScheduleMonthLabel" class="job-schedule-month-label"></div>
-              <div id="jobScheduleWeekdayRow" class="job-schedule-weekdays" aria-hidden="true"></div>
-              <div
-                id="jobScheduleCalendar"
-                class="job-schedule-calendar"
-                aria-label="이번 달 알바 가능 일 선택"
-              ></div>
-              <p id="jobScheduleSummary" class="job-schedule-summary"></p>
-              <p id="jobSchedulePenaltyHint" class="job-schedule-penalty-hint" hidden></p>
-              <button type="button" id="btnJobScheduleConfirm" class="btn-mts primary wide">
-                이번 달 스케줄 확정하기
-              </button>
+              <p id="lifeSalaryInfo" class="life-salary-info"></p>
+              <p id="lifeTradeLockHint" class="life-trade-lock-hint" hidden role="status"></p>
+              <div class="life-emergency-card">
+                <h3 class="life-emergency-title">급전 알바: 한강물 온도 재기</h3>
+                <p class="life-emergency-desc">
+                  예수금이 크게 부족할 때만 이용할 수 있습니다. 급전을 받으면 <strong>약 15분간 매수·매도만 잠기고</strong>, 차트·호가·체결강도는 그대로 실시간으로 움직입니다.
+                </p>
+                <button type="button" id="btnEmergencyHanRiver" class="btn-mts primary wide life-emergency-btn">
+                  급전 받기 (한강 알바)
+                </button>
+              </div>
             </section>
           </div>
         </main>
