@@ -29,7 +29,7 @@ const MONTHLY_SALARY = 3_000_000;
 const EMERGENCY_JOB_CASH_THRESHOLD = 1_000_000;
 /** 한강 급전 알바 매매 잠금(밀리초) — DB `emergency_han_river_job` 과 동일 */
 const EMERGENCY_LOCK_MS = 15 * 60 * 1000;
-const SHARE_QTY_DECIMALS = 6;
+/** 매매 수량은 DB(bigint 등)와 맞추기 위해 항상 정수(주)만 사용 */
 
 /** 현실 1초 = 게임 내 1분 */
 const GAME_MINUTES_PER_REAL_SEC = 1;
@@ -350,17 +350,10 @@ function getMonthContextForDayIndex(dayIndex) {
   return { y, m: mo + 1, startIdx, daysInMonth, padSun, monthKey };
 }
 
-function roundShareQty(q) {
-  const n = Number(q);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  const f = 10 ** SHARE_QTY_DECIMALS;
-  return Math.round(n * f) / f;
-}
-
 function formatShares(q) {
-  const n = Number(q);
+  const n = Math.floor(Number(q));
   if (!Number.isFinite(n) || n <= 0) return "—";
-  return n.toLocaleString("ko-KR", { maximumFractionDigits: SHARE_QTY_DECIMALS });
+  return n.toLocaleString("ko-KR", { maximumFractionDigits: 0 });
 }
 
 function isTradeBlockedByPenalty() {
@@ -781,7 +774,7 @@ async function loadUserFromServer() {
     game.costBasis[spec.id] = 0;
   });
   (ports || []).forEach((p) => {
-    game.holdings[p.symbol] = Number(p.shares);
+    game.holdings[p.symbol] = Math.max(0, Math.floor(Number(p.shares)));
     game.costBasis[p.symbol] = Number(p.avg_cost);
   });
   renderPlayerLoginBadge();
@@ -2066,7 +2059,10 @@ async function buyStock(stockId, quantityRaw, mode = "shares") {
   if (!onlineMode || !sb || !loginDisplayName) {
     return { ok: false, reason: "Supabase 연결이 필요합니다. config.js를 확인하세요." };
   }
-  const q = computeTradeQtyFromInput(stockId, "buy", quantityRaw, mode);
+  const q = Math.max(
+    0,
+    Math.floor(Number(computeTradeQtyFromInput(stockId, "buy", quantityRaw, mode)))
+  );
   if (!q || q <= 0) {
     return { ok: false, reason: "수량·금액을 올바르게 입력해 주세요." };
   }
@@ -2097,7 +2093,10 @@ async function sellStock(stockId, quantityRaw, mode = "shares") {
   if (!onlineMode || !sb || !loginDisplayName) {
     return { ok: false, reason: "Supabase 연결이 필요합니다. config.js를 확인하세요." };
   }
-  const q = computeTradeQtyFromInput(stockId, "sell", quantityRaw, mode);
+  const q = Math.max(
+    0,
+    Math.floor(Number(computeTradeQtyFromInput(stockId, "sell", quantityRaw, mode)))
+  );
   if (!q || q <= 0) {
     return { ok: false, reason: "수량·금액을 올바르게 입력해 주세요." };
   }
@@ -2579,23 +2578,22 @@ function computeTradeQtyFromInput(stockId, action, rawInput, mode) {
   const s = getStockById(stockId);
   if (!s || s.price <= 0) return 0;
   const clean = String(rawInput ?? "").replace(/,/g, "").trim();
+  const shHeld = Math.max(0, Math.floor(Number(game.holdings[stockId] ?? 0)));
   if (mode === "won") {
-    const won = parseFloat(clean);
+    const won = Math.floor(Number(parseFloat(clean)));
     if (!Number.isFinite(won) || won <= 0) return 0;
     if (action === "buy") {
-      const cap = Math.min(won, game.cash);
-      return roundShareQty(cap / s.price);
+      const cap = Math.min(won, Math.floor(game.cash));
+      return Math.max(0, Math.floor(cap / s.price));
     }
-    const sh = game.holdings[stockId] ?? 0;
-    const maxWon = sh * s.price;
+    const maxWon = Math.floor(shHeld * s.price);
     const use = Math.min(won, maxWon);
-    return roundShareQty(use / s.price);
+    return Math.max(0, Math.floor(use / s.price));
   }
-  const q = roundShareQty(parseFloat(clean));
+  let q = Math.max(0, Math.floor(Number(parseFloat(clean))));
   if (!q || q <= 0) return 0;
   if (action === "sell") {
-    const sh = game.holdings[stockId] ?? 0;
-    if (q > sh + 1e-8) return roundShareQty(sh);
+    if (q > shHeld) return shHeld;
   }
   return q;
 }
@@ -2640,11 +2638,16 @@ function updateDetailTradeLivePreview() {
   if (!wrap || !inp || !selectedStockId) return;
   const s = getStockById(selectedStockId);
   if (!s) return;
-  const qty = computeTradeQtyFromInput(
-    selectedStockId,
-    lastDetailTradeAction,
-    inp.value,
-    detailTradeInputMode
+  const qty = Math.max(
+    0,
+    Math.floor(
+      computeTradeQtyFromInput(
+        selectedStockId,
+        lastDetailTradeAction,
+        inp.value,
+        detailTradeInputMode
+      )
+    )
   );
   const avgEl = document.getElementById("detailPreviewAvg");
   const plEl = document.getElementById("detailPreviewPl");
@@ -2654,7 +2657,7 @@ function updateDetailTradeLivePreview() {
     return;
   }
   wrap.hidden = false;
-  const sh = game.holdings[selectedStockId] ?? 0;
+  const sh = Math.max(0, Math.floor(Number(game.holdings[selectedStockId] ?? 0)));
   const cb = game.costBasis[selectedStockId] ?? 0;
   const P = s.price;
 
@@ -3181,10 +3184,15 @@ function bindDetailTrade() {
         ? await buyStock(id, raw, detailTradeInputMode)
         : await sellStock(id, raw, detailTradeInputMode);
     if (result.ok) {
-      const q = computeTradeQtyFromInput(id, action, raw, detailTradeInputMode);
+      const q = Math.max(
+        0,
+        Math.floor(
+          computeTradeQtyFromInput(id, action, raw, detailTradeInputMode)
+        )
+      );
       const unit =
         detailTradeInputMode === "won"
-          ? `${formatWon(Math.round(Number(raw) || 0))}어치`
+          ? `${formatWon(Math.floor(Number(String(raw).replace(/,/g, "")) || 0))}어치`
           : `${formatShares(q)}주`;
       setMessage(
         action === "buy"
@@ -3223,7 +3231,10 @@ function bindDetailTrade() {
         );
       });
       syncDetailQtyLabel();
-      const q = roundShareQty((game.cash * 0.999) / s.price);
+      const q = Math.max(
+        0,
+        Math.floor((Math.floor(game.cash) * 0.999) / s.price)
+      );
       if (qtyInput) qtyInput.value = q > 0 ? String(q) : "0";
       updateDetailTradeLivePreview();
     });
@@ -3240,7 +3251,7 @@ function bindDetailTrade() {
         );
       });
       syncDetailQtyLabel();
-      const sh = game.holdings[selectedStockId] ?? 0;
+      const sh = Math.max(0, Math.floor(Number(game.holdings[selectedStockId] ?? 0)));
       if (qtyInput) qtyInput.value = sh > 0 ? String(sh) : "0";
       updateDetailTradeLivePreview();
     });
@@ -3633,7 +3644,7 @@ function renderStocks() {
       <td>${owned > 0 ? formatShares(owned) : "—"}</td>
       <td class="${plCls}">${owned > 0 ? `${pl >= 0 ? "+" : ""}${formatWon(pl)}` : "—"}</td>
       <td class="cell-qty-portfolio">
-        <input type="number" class="qty-input" min="0" step="any" value="1" data-stock="${escapeHtml(s.id)}" aria-label="${escapeHtml(s.name)} 수량" />
+        <input type="number" class="qty-input" min="0" step="1" value="1" data-stock="${escapeHtml(s.id)}" aria-label="${escapeHtml(s.name)} 수량" />
         <div class="portfolio-qty-quick">
           <button type="button" class="btn-mts ghost btn-qty-quick" data-portfolio-max="${escapeHtml(s.id)}">MAX</button>
           <button type="button" class="btn-mts ghost btn-qty-quick" data-portfolio-sellall="${escapeHtml(s.id)}">전량</button>
@@ -3655,7 +3666,10 @@ function renderStocks() {
       const row = b.closest("tr");
       const input = row?.querySelector(".qty-input");
       if (!st || !input || st.price <= 0) return;
-      const q = roundShareQty((game.cash * 0.999) / st.price);
+      const q = Math.max(
+        0,
+        Math.floor((Math.floor(game.cash) * 0.999) / st.price)
+      );
       input.value = q > 0 ? String(q) : "0";
     });
   });
@@ -3665,7 +3679,7 @@ function renderStocks() {
       const id = b.getAttribute("data-portfolio-sellall");
       const row = b.closest("tr");
       const input = row?.querySelector(".qty-input");
-      const sh = game.holdings[id] ?? 0;
+      const sh = Math.max(0, Math.floor(Number(game.holdings[id] ?? 0)));
       if (input) input.value = sh > 0 ? String(sh) : "0";
     });
   });
@@ -3683,7 +3697,10 @@ function renderStocks() {
       else result = await sellStock(id, qty, "shares");
 
       if (result.ok) {
-        const q = computeTradeQtyFromInput(id, action, qty, "shares");
+        const q = Math.max(
+          0,
+          Math.floor(computeTradeQtyFromInput(id, action, qty, "shares"))
+        );
         setMessage(
           action === "buy"
             ? `${id} 매수 완료 (${formatShares(q)}주).`
