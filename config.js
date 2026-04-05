@@ -1,5 +1,5 @@
-**
- * Supabase 연동 (로컬 전용 — 저장소에 커밋하지 마세요. config.example.js 참고)
+/**
+ * Supabase 연동 — Vercel·로컬 공통 (anon 키는 공개 전제, RLS로 보호)
  */
 window.STOCK_LIFE_CONFIG = {
   supabaseUrl: "https://wlatwgxojjzcbpdngzma.supabase.co",
