@@ -203,7 +203,7 @@
                   class="btn-watchlist detail-watch-btn"
                   aria-pressed="false"
                   aria-label="관심 종목"
-                  title="관심 종목"
+                  title="관심 종목 (최대 3개)"
                 >
                   <span class="watchlist-star" aria-hidden="true">☆</span>
                 </button>
@@ -336,6 +336,7 @@
                     전량 매도
                   </button>
                 </div>
+                <p class="trade-fee-hint">수수료 0.25% 포함</p>
                 <div id="detailTradePreview" class="detail-trade-preview" hidden>
                   <div class="detail-preview-row">
                     <span class="detail-preview-label">예상 평단</span>
@@ -382,7 +383,7 @@
               <section class="mts-section phone-news-inner">
                 <h2 class="phone-news-app-title">속보 피드</h2>
                 <p class="mts-section-desc phone-news-hint">
-                  <strong>관심(☆)</strong>·<strong>보유</strong> 종목 속보와 시장 안내(월급·장 마감 등)만 모입니다. 내 종목·관심 뉴스에는 <strong>[관심] [보유]</strong> 태그가 붙습니다.
+                  속보 피드에는 <strong>관심 종목(별표, 최대 3개)</strong> 관련 뉴스(진짜·찌라시)와 시장 전체 안내(월급·장 마감 등)만 모입니다. 관심 뉴스에는 <strong>[관심]</strong> 태그가 붙습니다.
                 </p>
                 <ul id="newsFeed" class="news-feed news-feed--phone" aria-live="polite"></ul>
               </section>
@@ -402,6 +403,7 @@
           >
             <section class="mts-section">
               <h2 class="mts-section-title">내 투자</h2>
+              <p class="trade-fee-hint">시장가 매수·매도 시 수수료 0.25% 포함</p>
               <div class="portfolio-table-wrap">
                 <table class="stock-table">
                   <thead>
@@ -512,7 +514,25 @@
       <span class="friend-trade-toast__text" id="friendTradeToastText"></span>
     </div>
 
-    <p id="message" class="mts-toast" role="status"></p>
+    <div
+      id="message"
+      class="mts-toast-shell"
+      hidden
+      role="status"
+      aria-live="polite"
+    >
+      <div class="mts-toast-card">
+        <p class="mts-toast-text" id="messageText"></p>
+        <button
+          type="button"
+          class="mts-toast-close"
+          id="messageClose"
+          aria-label="알림 닫기"
+        >
+          ×
+        </button>
+      </div>
+    </div>
 
     <script type="importmap">
       {

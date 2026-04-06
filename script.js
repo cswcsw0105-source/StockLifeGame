@@ -85,6 +85,12 @@ const EMERGENCY_LOCK_MS = 15 * 60 * 1000;
 
 /** 동전주 메타 — 상장 폐지 방지 최저가(원) */
 const MIN_STOCK_PRICE = 30;
+/** 거래 수수료 0.25% — 매수 시 총액×1.0025, 매도 시 총액×0.9975 (RPC·클라이언트 동일) */
+const TRADE_FEE_RATE = 0.0025;
+const TRADE_FEE_MULT_BUY = 1 + TRADE_FEE_RATE;
+const TRADE_FEE_MULT_SELL = 1 - TRADE_FEE_RATE;
+/** 관심 종목(속보 푸시·피드 필터) 상한 */
+const MAX_WATCHLIST_IDS = 3;
 
 /** 현실 1초 = 게임 내 1분 */
 const GAME_MINUTES_PER_REAL_SEC = 1;
@@ -136,6 +142,9 @@ let gameClockEverStarted = false;
 let phoneClockIntervalId = null;
 
 let newsFeedRevealTimers = [];
+
+let messageHideTimer = null;
+let messageDismissFadeTimer = null;
 
 /** 상세 매매: 주 단위 | 원화 금액(체결 수량은 시가로 환산) */
 let detailTradeInputMode = "shares";
@@ -594,11 +603,10 @@ function maybeApplyReitMonthlyDividend() {
 }
 
 function matchesMainNewsFilter(it) {
-  if (!it || it.global) return true;
+  if (!it) return false;
+  if (it.global) return true;
   if (!it.stockId) return false;
-  const hold = (game.holdings[it.stockId] ?? 0) > 0;
-  const watch = watchlistIds.includes(it.stockId);
-  return hold || watch;
+  return watchlistIds.includes(it.stockId);
 }
 
 function syncTradeButtons() {
@@ -959,7 +967,9 @@ async function loadUserFromServer() {
       )
     : [];
   watchlistIds = Array.isArray(prof.watchlist)
-    ? prof.watchlist.filter((id) => STOCK_SPECS.some((s) => s.id === id))
+    ? prof.watchlist
+        .filter((id) => STOCK_SPECS.some((s) => s.id === id))
+        .slice(0, MAX_WATCHLIST_IDS)
     : [];
 
   const { data: ports } = await sb
@@ -1223,6 +1233,7 @@ function applyServerMarketState(m) {
   updatePremarketChartOverlay();
   syncTradeButtons();
   syncNextTurnButton();
+  renderAssetSummary();
   } catch (e) {
     console.warn("applyServerMarketState", e);
     repairInvalidStockPrices();
@@ -1628,12 +1639,15 @@ function subscribeMarketRealtime() {
       (payload) => {
         try {
           const st = payload.new?.state;
-          if (st) applyServerMarketState(st);
+          if (st) {
+            applyServerMarketState(st);
+          } else {
+            renderAssetSummary();
+          }
           renderDateTimeLine();
           refreshDetailChart();
           renderStockListMain();
           updateDetailPriceLine();
-          renderAssetSummary();
           syncNextTurnButton();
           syncTradeButtons();
           updatePremarketChartOverlay();
@@ -1695,7 +1709,7 @@ async function persistUserNow() {
         age: playerProfile.age,
         birthday: playerProfile.birthday,
         setupComplete: playerProfile.setupComplete,
-        watchlist: watchlistIds,
+        watchlist: watchlistIds.slice(0, MAX_WATCHLIST_IDS),
         lastSalaryMonthKey: playerProfile.lastSalaryMonthKey || "",
         lastReitDivMonthKey: playerProfile.lastReitDivMonthKey || "",
         pendingOrders,
@@ -3360,6 +3374,22 @@ function refreshDetailChart() {
   updateDetailTradeLivePreview();
 }
 
+/** 예수금·주가 기준 수수료 반영 최대 매수 주수(RPC ROUND와 맞춤) */
+function maxBuySharesForCash(cash, price) {
+  const c = Math.floor(Number(cash));
+  const p = Number(price);
+  if (!Number.isFinite(c) || c <= 0 || !Number.isFinite(p) || p <= 0) return 0;
+  let hi = Math.floor(c / p);
+  let lo = 0;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi + 1) / 2);
+    const cost = Math.round(mid * p * TRADE_FEE_MULT_BUY);
+    if (cost <= c) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
 function computeTradeQtyFromInput(stockId, action, rawInput, mode) {
   const s = getStockById(stockId);
   if (!s || s.price <= 0) return 0;
@@ -3370,7 +3400,15 @@ function computeTradeQtyFromInput(stockId, action, rawInput, mode) {
     if (!Number.isFinite(won) || won <= 0) return 0;
     if (action === "buy") {
       const cap = Math.min(won, Math.floor(game.cash));
-      return Math.max(0, Math.floor(cap / s.price));
+      let lo = 0;
+      let hi =
+        Math.floor(cap / (s.price * TRADE_FEE_MULT_BUY)) + 2;
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi + 1) / 2);
+        if (Math.round(mid * s.price * TRADE_FEE_MULT_BUY) <= cap) lo = mid;
+        else hi = mid - 1;
+      }
+      return Math.max(0, lo);
     }
     const maxWon = Math.floor(shHeld * s.price);
     const use = Math.min(won, maxWon);
@@ -3380,6 +3418,9 @@ function computeTradeQtyFromInput(stockId, action, rawInput, mode) {
   if (!q || q <= 0) return 0;
   if (action === "sell") {
     if (q > shHeld) return shHeld;
+  } else if (action === "buy") {
+    const maxAff = maxBuySharesForCash(game.cash, s.price);
+    if (q > maxAff) q = maxAff;
   }
   return q;
 }
@@ -3457,7 +3498,7 @@ function updateDetailTradeLivePreview() {
   const P = s.price;
 
   if (lastDetailTradeAction === "buy") {
-    const cost = Math.round(P * qty);
+    const cost = Math.round(P * qty * TRADE_FEE_MULT_BUY);
     const newSh = sh + qty;
     const newCb = cb + cost;
     const newAvg = newSh > 0 ? newCb / newSh : 0;
@@ -3483,14 +3524,14 @@ function updateDetailTradeLivePreview() {
   } else {
     const sellQty = Math.min(qty, sh);
     const propCost = sh > 0 ? (cb * sellQty) / sh : 0;
-    const gain = sellQty * P - propCost;
+    const proceeds = Math.round(P * sellQty * TRADE_FEE_MULT_SELL);
+    const gain = proceeds - propCost;
     const newSh = sh - sellQty;
     const newCb = cb - propCost;
     const newAvg = newSh > 1e-8 ? newCb / newSh : 0;
     const newStockVal = Math.max(0, newSh * P);
     const oldStockVal = sh * P;
-    const g = Math.round(P * sellQty);
-    const hypNw = netWorth() - oldStockVal + newStockVal + g;
+    const hypNw = netWorth() - oldStockVal + newStockVal + proceeds;
     if (avgEl) {
       avgEl.textContent =
         newSh < 1e-8 ? "—" : formatStockWon(Math.floor(newAvg));
@@ -3584,15 +3625,8 @@ const AMBIENT_NEWS_TEMPLATES = [
 
 function pickStockIdForAmbientNews() {
   const wl = watchlistIds.filter((id) => getStockById(id));
-  const allIds = stocks.map((s) => s.id);
-  if (allIds.length === 0) return null;
-  if (wl.length === 0) {
-    return allIds[Math.floor(Math.random() * allIds.length)];
-  }
-  if (Math.random() < 0.68) {
-    return wl[Math.floor(Math.random() * wl.length)];
-  }
-  return allIds[Math.floor(Math.random() * allIds.length)];
+  if (wl.length === 0) return null;
+  return wl[Math.floor(Math.random() * wl.length)];
 }
 
 function scheduleAmbientNewsTimer() {
@@ -3760,7 +3794,16 @@ function renderDateTimeLine() {
 function toggleWatchlist(stockId) {
   const idx = watchlistIds.indexOf(stockId);
   if (idx >= 0) watchlistIds.splice(idx, 1);
-  else watchlistIds.push(stockId);
+  else {
+    if (watchlistIds.length >= MAX_WATCHLIST_IDS) {
+      setMessage(
+        "정보력의 한계! 관심 종목은 최대 3개까지만 등록 가능합니다.",
+        "ok"
+      );
+      return;
+    }
+    watchlistIds.push(stockId);
+  }
   schedulePersistUser();
   renderStockListMain();
   updateDetailWatchlistButton();
@@ -3826,7 +3869,7 @@ function renderStockListMain() {
     li.dataset.stockId = s.id;
     li.innerHTML = `
       <div class="stock-list-row-main">
-        <button type="button" class="btn-watchlist list-watch-btn" data-watch-stock="${escapeHtml(s.id)}" aria-label="관심 종목" aria-pressed="${watched}" title="관심 종목">
+        <button type="button" class="btn-watchlist list-watch-btn" data-watch-stock="${escapeHtml(s.id)}" aria-label="관심 종목" aria-pressed="${watched}" title="관심 종목 (최대 ${MAX_WATCHLIST_IDS}개)">
           <span class="watchlist-star" aria-hidden="true">${watched ? "★" : "☆"}</span>
         </button>
         <div class="stock-list-name-block">
@@ -4079,10 +4122,7 @@ function bindDetailTrade() {
         );
       });
       syncDetailQtyLabel();
-      const q = Math.max(
-        0,
-        Math.floor((Math.floor(game.cash) * 0.999) / s.price)
-      );
+      const q = maxBuySharesForCash(game.cash, s.price);
       if (qtyInput) qtyInput.value = q > 0 ? String(q) : "0";
       updateDetailTradeLivePreview();
     });
@@ -4122,6 +4162,32 @@ function bindDetailTrade() {
   syncTradeButtons();
 }
 
+/** 내 투자 탭 테이블: 시세 틱마다 현재가·평가손익만 갱신(행 전체 재생성 없음) */
+function refreshPortfolioTableCells() {
+  const tbody = document.getElementById("stockRows");
+  if (!tbody || tbody.querySelectorAll("tr").length === 0) return;
+  const esc =
+    typeof CSS !== "undefined" && typeof CSS.escape === "function"
+      ? (id) => CSS.escape(id)
+      : (id) => String(id).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  stocks.forEach((s) => {
+    const priceEl = tbody.querySelector(
+      `[data-portfolio-price="${esc(s.id)}"]`
+    );
+    if (priceEl) priceEl.textContent = formatStockWon(s.price);
+    const plTd = tbody.querySelector(`td[data-portfolio-pl="${esc(s.id)}"]`);
+    if (!plTd) return;
+    const owned = game.holdings[s.id] ?? 0;
+    const cb = game.costBasis[s.id] ?? 0;
+    const evalVal = owned * s.price;
+    const pl = Math.round(evalVal - cb);
+    const plCls = pl > 0 ? "chg-up" : pl < 0 ? "chg-down" : "chg-flat";
+    plTd.className = plCls;
+    plTd.textContent =
+      owned > 0 ? `${pl >= 0 ? "+" : ""}${formatWon(pl)}` : "—";
+  });
+}
+
 function renderAssetSummary() {
   const nw = netWorth();
   const base = game.initialCapital ?? INITIAL_CAPITAL;
@@ -4156,6 +4222,7 @@ function renderAssetSummary() {
     }`;
   }
 
+  refreshPortfolioTableCells();
 }
 
 function renderCalendarUI() {
@@ -4428,11 +4495,43 @@ function closeMarket() {
   syncNextTurnButton();
 }
 
+function dismissMessage() {
+  const shell = document.getElementById("message");
+  if (!shell) return;
+  clearTimeout(messageHideTimer);
+  messageHideTimer = null;
+  clearTimeout(messageDismissFadeTimer);
+  shell.classList.add("mts-toast--hiding");
+  messageDismissFadeTimer = setTimeout(() => {
+    shell.hidden = true;
+    shell.classList.remove("mts-toast--hiding");
+    messageDismissFadeTimer = null;
+  }, 320);
+}
+
 function setMessage(text, type = "") {
-  const el = document.getElementById("message");
-  if (!el) return;
-  el.textContent = text;
-  el.className = "mts-toast" + (type ? ` ${type}` : "");
+  const shell = document.getElementById("message");
+  const textEl = document.getElementById("messageText");
+  if (!shell || !textEl) return;
+  clearTimeout(messageHideTimer);
+  clearTimeout(messageDismissFadeTimer);
+  messageHideTimer = null;
+  shell.classList.remove("mts-toast--hiding");
+  textEl.textContent = text;
+  const card = shell.querySelector(".mts-toast-card");
+  if (card) {
+    card.className = "mts-toast-card" + (type ? ` ${type}` : "");
+  }
+  shell.hidden = false;
+  messageHideTimer = setTimeout(() => dismissMessage(), 3600);
+}
+
+function bindToastUiOnce() {
+  const shell = document.getElementById("message");
+  const btn = document.getElementById("messageClose");
+  if (!shell || !btn || shell.dataset.toastBound === "1") return;
+  shell.dataset.toastBound = "1";
+  btn.addEventListener("click", () => dismissMessage());
 }
 
 function renderStocks() {
@@ -4457,7 +4556,7 @@ function renderStocks() {
       <td><span data-portfolio-price="${escapeHtml(s.id)}" class="watch-price">${formatStockWon(s.price)}</span></td>
       <td>${owned > 0 ? formatStockWon(avg) : "—"}</td>
       <td>${owned > 0 ? formatShares(owned) : "—"}</td>
-      <td class="${plCls}">${owned > 0 ? `${pl >= 0 ? "+" : ""}${formatWon(pl)}` : "—"}</td>
+      <td class="${plCls}" data-portfolio-pl="${escapeHtml(s.id)}">${owned > 0 ? `${pl >= 0 ? "+" : ""}${formatWon(pl)}` : "—"}</td>
       <td class="cell-qty-portfolio">
         <input type="number" class="qty-input" min="0" step="1" value="1" data-stock="${escapeHtml(s.id)}" aria-label="${escapeHtml(s.name)} 수량" />
         <div class="portfolio-qty-quick">
@@ -4481,10 +4580,7 @@ function renderStocks() {
       const row = b.closest("tr");
       const input = row?.querySelector(".qty-input");
       if (!st || !input || st.price <= 0) return;
-      const q = Math.max(
-        0,
-        Math.floor((Math.floor(game.cash) * 0.999) / st.price)
-      );
+      const q = maxBuySharesForCash(game.cash, st.price);
       input.value = q > 0 ? String(q) : "0";
     });
   });
@@ -4711,6 +4807,7 @@ async function runGameBootstrap() {
 }
 
 async function init() {
+  bindToastUiOnce();
   const showLoginError = (msg) => {
     const el = document.getElementById("loginGateError");
     if (!el) return;

@@ -1350,38 +1350,107 @@ body {
   margin-top: 16px;
 }
 
+.trade-fee-hint {
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  margin: 0 0 10px 0;
+  line-height: 1.35;
+  opacity: 0.88;
+}
+
+.detail-trade-panel .trade-fee-hint {
+  margin: 4px 0 10px;
+}
+
 .cell-actions {
   display: flex;
   gap: 4px;
 }
 
-/* Toast */
-.mts-toast {
+/* Toast — 우측 상단 푸시 스타일 */
+.mts-toast-shell {
   position: fixed;
-  bottom: calc(var(--tab-h) + var(--safe-bottom) + 20px);
-  left: 50%;
-  transform: translateX(-50%);
-  max-width: 90%;
+  top: max(12px, env(safe-area-inset-top, 0px));
+  right: max(12px, env(safe-area-inset-right, 0px));
+  left: auto;
+  bottom: auto;
+  transform: none;
+  max-width: min(92vw, 340px);
   margin: 0;
-  padding: 10px 16px;
-  border-radius: 10px;
-  background: rgba(22, 26, 34, 0.95);
-  border: 1px solid var(--border);
-  font-size: 0.78rem;
-  color: var(--text-dim);
   z-index: 999999;
   pointer-events: none;
-  text-align: center;
 }
 
-.mts-toast.ok {
+.mts-toast-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 12px 12px 14px;
+  border-radius: 14px;
+  background: rgba(18, 22, 30, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 4px 6px rgba(0, 0, 0, 0.15),
+    0 12px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(14px);
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  pointer-events: auto;
+  transition:
+    opacity 0.32s ease,
+    transform 0.32s ease;
+}
+
+.mts-toast-shell.mts-toast--hiding .mts-toast-card {
+  opacity: 0;
+  transform: translateX(10px);
+}
+
+.mts-toast-text {
+  flex: 1;
+  margin: 0;
+  line-height: 1.45;
+  text-align: left;
+  word-break: break-word;
+}
+
+.mts-toast-close {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  margin: -4px -4px -4px 0;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-dim);
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.mts-toast-close:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text);
+}
+
+.mts-toast-close:focus-visible {
+  outline: 2px solid rgba(96, 165, 250, 0.6);
+  outline-offset: 1px;
+}
+
+.mts-toast-card.ok {
   color: #6ee7b7;
   border-color: rgba(52, 211, 153, 0.35);
 }
 
-.mts-toast.err {
+.mts-toast-card.err {
   color: #fca5a5;
-  border-color: rgba(248, 113, 113, 0.35);
+  border-color: rgba(248, 113, 113, 0.38);
 }
 
 /* Tab bar */

@@ -158,7 +158,7 @@ BEGIN
     RETURN JSONB_BUILD_OBJECT('ok', FALSE, 'reason', '매매가 일시 중지되었습니다.');
   END IF;
 
-  cost := ROUND(px * p_qty::NUMERIC);
+  cost := ROUND(px * p_qty::NUMERIC * 1.0025);
   IF cost > u.cash THEN
     RETURN JSONB_BUILD_OBJECT('ok', FALSE, 'reason', '현금이 부족합니다.');
   END IF;
@@ -233,7 +233,7 @@ BEGIN
     RETURN JSONB_BUILD_OBJECT('ok', FALSE, 'reason', '보유 수량보다 많이 팔 수 없습니다.');
   END IF;
 
-  gain := ROUND(px * p_qty::NUMERIC);
+  gain := ROUND(px * p_qty::NUMERIC * 0.9975);
   IF sh = p_qty THEN
     new_cb := 0;
   ELSE
