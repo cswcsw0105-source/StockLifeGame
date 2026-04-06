@@ -27,14 +27,14 @@ function rollIsRumor() {
   return Math.random() < RUMOR_FRACTION;
 }
 
-/** 찌라시(is_rumor) UI 위장용 — 저장·엔진 로직은 is_rumor 플래그만 사용 */
-const RUMOR_DISPLAY_FAKE_TAGS = [
-  "[속보]",
+/** 종목 속보 표시 시 접두 태그(해시 고정) — 찌라시·실제 구분 가리기 */
+const NEWS_DISPLAY_PREFIX_TAGS = [
   "[단독]",
+  "[속보]",
   "[특징주]",
   "[마감전]",
-  "[긴급]",
   "[특종]",
+  "[긴급]",
 ];
 
 function stableHashForNewsDisplay(it) {
@@ -56,19 +56,20 @@ function stripLeadingBracketTags(s) {
 }
 
 /**
- * 뉴스 목록·상세 표시문. `is_rumor`일 때만 텍스트를 가공하며, 원본 `it.text`는 바꾸지 않음.
+ * 뉴스 목록·상세 표시문. 원본 `it.text` 미변경. 글로벌 안내(월급 등)만 원문 그대로.
  */
 function newsTextForDisplay(it) {
-  const raw = it?.text ?? "";
-  if (!it || it.is_rumor !== true) {
+  if (!it) return "";
+  const raw = String(it.text ?? "");
+  if (it.global === true) {
     return raw;
   }
-  let body = String(raw).replace(/찌라시/g, "");
+  let body = raw.replace(/찌라시/g, "");
   body = stripLeadingBracketTags(body);
   body = body.replace(/\s{2,}/g, " ").trim();
   const tag =
-    RUMOR_DISPLAY_FAKE_TAGS[
-      stableHashForNewsDisplay(it) % RUMOR_DISPLAY_FAKE_TAGS.length
+    NEWS_DISPLAY_PREFIX_TAGS[
+      stableHashForNewsDisplay(it) % NEWS_DISPLAY_PREFIX_TAGS.length
     ];
   if (!body) return tag;
   return `${tag} ${body}`;
@@ -257,6 +258,15 @@ const STOCK_SPECS = [
   },
 ];
 
+function memeNewsEligibleSpec(spec) {
+  if (!spec) return false;
+  return spec.kind !== "etf" && spec.kind !== "reit";
+}
+
+function memeNewsEligibleId(id) {
+  return memeNewsEligibleSpec(STOCK_SPECS.find((s) => s.id === id));
+}
+
 let saveDebounceId = null;
 
 let sb = null;
@@ -408,7 +418,7 @@ let afterHoursPlanGeneratedToday = false;
 /** 09:00 시초가 갭 반영 여부(하루 1회) */
 let openingGapAppliedToday = false;
 
-/** 종목별 오늘 뉴스(체이닝) 건수 — 최대 3 */
+/** 종목별 오늘 뉴스(체이닝) 건수 — 최대 6 */
 let newsCountByStock = emptyChainState();
 /** 체이닝 다음 스텝 인덱스 */
 let chainStepByStock = emptyChainState();
@@ -1752,145 +1762,81 @@ async function bootstrapSupabase() {
  */
 const NEWS_CHAINS = {
   JBD: [
-    {
-      headline:
-        "[속보] 재빈디자인, 글로벌 브랜드 리뉴얼 프로젝트 수주 확대",
-      impacts: { JBD: 0.008 },
-      bias: { JBD: 0.006 },
-      volFactor: 1.28,
-    },
-    {
-      headline:
-        "[분석] 대형 클라이언트 지출 축소 — 단기 수주 공백 우려",
-      impacts: { JBD: -0.006 },
-      bias: { JBD: -0.005 },
-      volFactor: 1.22,
-    },
+    { headline: "디자인 시안 100번째 수정 중 수석 디자이너 오열... '굴림체는 안 된다고 했잖아요'", impacts: { JBD: 0.007 }, bias: { JBD: 0.005 }, volFactor: 1.26 },
+    { headline: "신규 로고에 무지개색 파스텔 톤 적용... 네티즌들 '눈뽕 테러' VS '힙하다' 갑론을박", impacts: { JBD: -0.006 }, bias: { JBD: -0.004 }, volFactor: 1.24 },
+    { headline: "대표, 핀터레스트 켜놓고 영감 찾는 척하다 낮잠 자는 모습 포착돼", impacts: { JBD: 0.008 }, bias: { JBD: 0.006 }, volFactor: 1.28 },
+    { headline: "디자인 팀 막내, PPT에 보노보노 넣었다가 해외 바이어에게 '아방가르드하다'며 극찬받아", impacts: { JBD: -0.007 }, bias: { JBD: -0.005 }, volFactor: 1.22 },
+    { headline: "사옥 외벽 페인트칠, 페인트공의 수전증으로 의도치 않은 '그라데이션 예술' 탄생", impacts: { JBD: 0.006 }, bias: { JBD: 0.004 }, volFactor: 1.25 },
+    { headline: "대표, 탕비실 믹스커피 비율 맞추는 데 하루 종일 집중... '이것이 진정한 황금비율'", impacts: { JBD: -0.008 }, bias: { JBD: -0.006 }, volFactor: 1.3 },
   ],
   SYW: [
-    {
-      headline:
-        "[속보] 승윤윙즈, 자율주행 시범 구간 확대·파트너십 체결",
-      impacts: { SYW: 0.01 },
-      bias: { SYW: 0.007 },
-      volFactor: 1.32,
-    },
-    {
-      headline:
-        "[분석] 안전 인증 일정 지연 — 모빌리티 사업 밸류에이션 재점검",
-      impacts: { SYW: -0.007 },
-      bias: { SYW: -0.006 },
-      volFactor: 1.26,
-    },
+    { headline: "테스트 비행 중이던 택배 드론, 비둘기 떼와 영역 싸움 벌이다 추락", impacts: { SYW: 0.009 }, bias: { SYW: 0.006 }, volFactor: 1.27 },
+    { headline: "자율주행 킥보드, 지 혼자 한강 공원 편의점 앞까지 주행 후 배터리 방전", impacts: { SYW: -0.007 }, bias: { SYW: -0.005 }, volFactor: 1.23 },
+    { headline: "CEO, '이제 걸어 다니는 시대는 끝났다' 선언 후 퇴근길 지하철에서 목격돼", impacts: { SYW: 0.008 }, bias: { SYW: 0.007 }, volFactor: 1.3 },
+    { headline: "신형 드론, 배달 치킨 싣고 날아가다 갈매기 떼에게 격추당해 공중 분해", impacts: { SYW: -0.009 }, bias: { SYW: -0.006 }, volFactor: 1.26 },
+    { headline: "자율주행 휠체어 개발 중... 최고 시속 80km로 측정돼 '노인 폭주족' 우려", impacts: { SYW: 0.007 }, bias: { SYW: 0.005 }, volFactor: 1.24 },
+    { headline: "차세대 로켓 부스터, 실수로 대표실 의자에 장착... '승천하는 주가 기원'", impacts: { SYW: -0.008 }, bias: { SYW: -0.005 }, volFactor: 1.29 },
   ],
   MJS: [
-    {
-      headline:
-        "[속보] 민준스테이, 구독형 케어 서비스 MAU 전년比 두 자릿수 성장",
-      impacts: { MJS: 0.012 },
-      bias: { MJS: 0.008 },
-      volFactor: 1.35,
-    },
-    {
-      headline:
-        "[속보] 경쟁사 무료 프로모션 확대 — 단기 이탈 우려",
-      impacts: { MJS: -0.008 },
-      bias: { MJS: -0.005 },
-      volFactor: 1.28,
-    },
+    { headline: "VIP 케어 서비스에 '할머니 약손' 요법 도입... 만족도 500% 폭발", impacts: { MJS: 0.01 }, bias: { MJS: 0.007 }, volFactor: 1.32 },
+    { headline: "신규 플랫폼 서버 다운... 원인은 서버실에서 라면 끓여 먹다 전원 뽑음", impacts: { MJS: -0.008 }, bias: { MJS: -0.006 }, volFactor: 1.28 },
+    { headline: "호텔 조식 뷔페에 '오이 탕후루' 등장... 투숙객들 경악 속 묘한 중독성 호소", impacts: { MJS: 0.009 }, bias: { MJS: 0.006 }, volFactor: 1.25 },
+    { headline: "AI 룸서비스 로봇, 길 잃고 인근 편의점에서 소주 사오다 적발돼", impacts: { MJS: -0.007 }, bias: { MJS: -0.005 }, volFactor: 1.22 },
+    { headline: "VIP 스위트룸 변기 막힘... 배관공이 실수로 숨겨진 금괴 발견해 지분 떡상 논란", impacts: { MJS: 0.011 }, bias: { MJS: 0.008 }, volFactor: 1.33 },
+    { headline: "풀빌라 예약 앱에 '유령과 합석 가능' 옵션 버그 발생... 공포 마니아들 성지로 등극", impacts: { MJS: -0.009 }, bias: { MJS: -0.006 }, volFactor: 1.27 },
   ],
   BSL: [
-    {
-      headline:
-        "[특징주] 범서랩, 기능성 라인 해외 채널 매출 호조",
-      impacts: { BSL: 0.009 },
-      bias: { BSL: 0.006 },
-      volFactor: 1.24,
-    },
-    {
-      headline:
-        "[속보] 원료·물류비 상승 — 마진 압박 전망",
-      impacts: { BSL: -0.007 },
-      bias: { BSL: -0.005 },
-      volFactor: 1.3,
-    },
+    { headline: "연구원 실수로 '민트초코맛 떡볶이' 소스 개발... 품절 대란 조짐", impacts: { BSL: 0.008 }, bias: { BSL: 0.005 }, volFactor: 1.23 },
+    { headline: "탈모 치료제 연구 중 실수로 연구실 화분 식물들만 무성하게 자라나...", impacts: { BSL: -0.007 }, bias: { BSL: -0.004 }, volFactor: 1.21 },
+    { headline: "랩실 냉장고에서 누군가 남겨둔 마카롱 도난 사건 발생, 팀워크 붕괴 우려", impacts: { BSL: 0.009 }, bias: { BSL: 0.006 }, volFactor: 1.26 },
+    { headline: "숙취해소제 임상실험 중 부작용으로 '노래방 탬버린 1시간 무한 체력' 효과 발견", impacts: { BSL: -0.008 }, bias: { BSL: -0.005 }, volFactor: 1.29 },
+    { headline: "랩실 탈출한 실험용 쥐, 인근 PC방에서 마우스 갉아먹다 현행범 체포", impacts: { BSL: 0.007 }, bias: { BSL: 0.005 }, volFactor: 1.24 },
+    { headline: "수면 유도제 완벽 개발 성공! ...근데 개발팀 전원이 3일째 꿀잠 자느라 출근 안 함", impacts: { BSL: -0.009 }, bias: { BSL: -0.006 }, volFactor: 1.31 },
   ],
   SYG: [
-    {
-      headline:
-        "[속보] 석영기어, 정밀 모듈 대형 수주 및 생산 라인 증설",
-      impacts: { SYG: 0.011 },
-      bias: { SYG: 0.008 },
-      volFactor: 1.34,
-    },
-    {
-      headline:
-        "[분석] 설비 투자 사이클 둔화 — 단기 목표가 하향",
-      impacts: { SYG: -0.009 },
-      bias: { SYG: -0.007 },
-      volFactor: 1.3,
-    },
+    { headline: "공장장, 기어 윤활유 대신 실수로 참기름 발라... '고소한 냄새에 작업 능률 떡상'", impacts: { SYG: 0.009 }, bias: { SYG: 0.007 }, volFactor: 1.28 },
+    { headline: "신형 정밀 모듈에서 알 수 없는 삐걱 소리 발생... 알고 보니 기계에 낀 귀뚜라미 탓", impacts: { SYG: -0.008 }, bias: { SYG: -0.005 }, volFactor: 1.25 },
+    { headline: "공장 컨베이어 벨트에 초고속 모터 달았더니 직원들 강제 다이어트 성공", impacts: { SYG: 0.008 }, bias: { SYG: 0.006 }, volFactor: 1.26 },
+    { headline: "부품 결함으로 톱니바퀴 역방향 회전... '시간 여행' 테마주로 편입되나?", impacts: { SYG: -0.007 }, bias: { SYG: -0.005 }, volFactor: 1.22 },
+    { headline: "사내 식당 반찬으로 나온 깍두기가 톱니바퀴 모양으로 썰려있어 직원들 광기 호소", impacts: { SYG: 0.01 }, bias: { SYG: 0.007 }, volFactor: 1.32 },
+    { headline: "최고급 쇠구슬 베어링, 구슬치기 대회 상품으로 유출되어 동네 초등학생들 싹쓸이", impacts: { SYG: -0.009 }, bias: { SYG: -0.006 }, volFactor: 1.28 },
   ],
   JWF: [
-    {
-      headline:
-        "[운용] 진우펀드, 펀드 순매수 유입·운용 규모 확대",
-      impacts: { JWF: 0.005 },
-      bias: { JWF: 0.006 },
-      volFactor: 1.15,
-    },
-    {
-      headline:
-        "[속보] 포트폴리오 일부 환매 증가 — 단기 수익률 변동성",
-      impacts: { JWF: -0.005 },
-      bias: { JWF: -0.004 },
-      volFactor: 1.18,
-    },
+    { headline: "펀드매니저, 점심시간에 도지코인 풀매수했다가 대표한테 걸려 시말서 작성", impacts: { JWF: 0.006 }, bias: { JWF: 0.005 }, volFactor: 1.18 },
+    { headline: "투자 설명회 중 PPT 대신 본인 롤(LoL) 매드무비 재생하는 대참사 발생", impacts: { JWF: -0.006 }, bias: { JWF: -0.004 }, volFactor: 1.2 },
+    { headline: "메인 서버에 몰래 비트코인 채굴기 연결한 인턴, 수익률 500% 달성해 본부장 특진", impacts: { JWF: 0.008 }, bias: { JWF: 0.006 }, volFactor: 1.24 },
+    { headline: "AI 트레이딩 봇, 딥러닝 중 유튜브 알고리즘에 빠져 10시간째 먹방만 시청 중", impacts: { JWF: -0.007 }, bias: { JWF: -0.005 }, volFactor: 1.22 },
+    { headline: "사내 체육대회 윷놀이에서 대표가 '빽도' 던진 후 펀드 수익률도 빽도 치는 중", impacts: { JWF: 0.007 }, bias: { JWF: 0.005 }, volFactor: 1.19 },
+    { headline: "고객 수익률 방어용으로 '기도 메타' 도입... 전 직원 매일 아침 성수 뿌리며 출근", impacts: { JWF: -0.008 }, bias: { JWF: -0.005 }, volFactor: 1.25 },
   ],
   YHL: [
-    {
-      headline:
-        "[패션] 요한룩, 큐레이션 컬렉션 매출 전년比 성장",
-      impacts: { YHL: 0.009 },
-      bias: { YHL: 0.006 },
-      volFactor: 1.28,
-    },
-    {
-      headline:
-        "[이슈] 소비 둔화 우려 — 패션 플랫폼 업종 동반 약세",
-      impacts: { YHL: -0.008 },
-      bias: { YHL: -0.005 },
-      volFactor: 1.32,
-    },
+    { headline: "S/S 신상 컬렉션 '할매니얼 꽃무늬 몸빼바지', 파리 패션위크에서 기립박수 받아", impacts: { YHL: 0.009 }, bias: { YHL: 0.006 }, volFactor: 1.27 },
+    { headline: "수석 디자이너, 츄리닝 입고 출근하다 정문 경비 아저씨한테 입구 컷 당해", impacts: { YHL: -0.007 }, bias: { YHL: -0.005 }, volFactor: 1.23 },
+    { headline: "신상 '구멍 난 양말', 빈티지 감성으로 10만 원에 완판... '이게 패션이다'", impacts: { YHL: 0.008 }, bias: { YHL: 0.006 }, volFactor: 1.26 },
+    { headline: "모델 피팅 중 바지 터지는 사고 발생... '트임 팬츠'로 이름 바꿔 출시 결의", impacts: { YHL: -0.008 }, bias: { YHL: -0.005 }, volFactor: 1.28 },
+    { headline: "수석 디자이너, 영감 얻겠다고 3일 안 씻고 출근했다가 파리 떼 꼬여서 자체 모자이크", impacts: { YHL: 0.01 }, bias: { YHL: 0.007 }, volFactor: 1.3 },
+    { headline: "차기작으로 '투명 망토' 콘셉트 발표했으나 그냥 옷 안 입은 거 아니냐는 논란 일어", impacts: { YHL: -0.009 }, bias: { YHL: -0.006 }, volFactor: 1.31 },
   ],
   SWB: [
-    {
-      headline:
-        "[플랫폼] 선웅비즈, B2B 솔루션 신규 계약·처리량 기록 경신",
-      impacts: { SWB: 0.006 },
-      bias: { SWB: 0.005 },
-      volFactor: 1.18,
-    },
-    {
-      headline:
-        "[속보] 요금·수수료 인하 논의 — 수익성 우려",
-      impacts: { SWB: -0.006 },
-      bias: { SWB: -0.004 },
-      volFactor: 1.22,
-    },
+    { headline: "최선웅 대표, 사무실에서 몰래 게임하다 마이크 켜져서 전 직원에게 티어(브론즈) 들통나...", impacts: { SWB: 0.007 }, bias: { SWB: 0.005 }, volFactor: 1.2 },
+    { headline: "B2B 솔루션에 실수로 '사장님 몰래 퇴근하는 버튼' 추가해 직장인들 열광", impacts: { SWB: -0.006 }, bias: { SWB: -0.004 }, volFactor: 1.22 },
+    { headline: "최선웅 대표, 점심 메뉴 고르는 AI 개발하다 3박 4일째 짜장면 vs 짬뽕 무한 루프", impacts: { SWB: 0.008 }, bias: { SWB: 0.006 }, volFactor: 1.24 },
+    { headline: "신입사원, 회식 자리에서 사장님 정수리에 소맥 제조... '강력한 MZ의 등장' 주가 요동", impacts: { SWB: -0.008 }, bias: { SWB: -0.005 }, volFactor: 1.26 },
+    { headline: "B2B 메신저에 '오타 자동 완성' 기능 넣었더니 '부장님 사랑해요'가 '부장님 사퇴하세요'로 전송돼 서버 폭주", impacts: { SWB: 0.009 }, bias: { SWB: 0.006 }, volFactor: 1.28 },
+    { headline: "회사 워크샵에서 최선웅 대표 춤사위 공개... 충격받은 투자자들 단체 매도 시도", impacts: { SWB: -0.007 }, bias: { SWB: -0.005 }, volFactor: 1.25 },
   ],
 };
 
-/** 당일 완료 봉 수(1-based) — 체이닝 스텝 발화 (하루 최대 39봉) */
+/** 당일 완료 봉 수(1-based) — 종목당 체이닝 최대 6회 */
 const CHAIN_SCHEDULE = {
-  JBD: [4, 25],
-  SYW: [6, 27],
-  MJS: [8, 29],
-  BSL: [10, 31],
-  SYG: [12, 33],
-  JWF: [14, 35],
-  YHL: [16, 37],
-  SWB: [18, 22],
+  JBD: [3, 9, 15, 21, 27, 33],
+  SYW: [4, 10, 16, 22, 28, 34],
+  MJS: [5, 11, 17, 23, 29, 35],
+  BSL: [3, 8, 14, 20, 26, 32],
+  SYG: [4, 9, 15, 21, 27, 34],
+  JWF: [5, 10, 16, 22, 28, 36],
+  YHL: [6, 11, 17, 23, 29, 37],
+  SWB: [7, 12, 18, 24, 30, 38],
 };
 
 const HORIZON_EVENT_TEMPLATES = [
@@ -2317,20 +2263,33 @@ function resetDailyNewsState() {
   chainStepByStock = emptyChainState();
 }
 
-function buildPremarketHeadline(stockId, positive) {
+/** 상승/하락 편에 맞는 밈 헤드라인( impacts 부호 기준 ) */
+function pickMemeHeadlineForPolarity(stockId, positive) {
   const chain = NEWS_CHAINS[stockId];
-  if (chain && chain.length > 0) {
-    const pickFrom = positive
-      ? chain.filter((_, i) => i % 2 === 0)
-      : chain.filter((_, i) => i % 2 === 1);
-    const pool = pickFrom.length > 0 ? pickFrom : chain;
-    return pool[Math.floor(Math.random() * pool.length)].headline;
+  if (!chain || chain.length === 0) {
+    const s = getStockById(stockId);
+    const name = s ? s.name : stockId;
+    return positive
+      ? `${name} 쪽에서 호재 소문이 돈다`
+      : `${name} 쪽에서 악재 소문이 돈다`;
   }
-  const s = getStockById(stockId);
-  const name = s ? s.name : stockId;
-  return positive
-    ? `[프리마켓] ${name} — 긍정적 속보가 유통됩니다`
-    : `[프리마켓] ${name} — 부정적 속보가 유통됩니다`;
+  const pickFrom = chain.filter((story) => {
+    const v = story.impacts[stockId];
+    if (v === undefined || v === 0) return true;
+    return positive ? v > 0 : v < 0;
+  });
+  const pool = pickFrom.length > 0 ? pickFrom : chain;
+  return pool[Math.floor(Math.random() * pool.length)].headline;
+}
+
+function randomMemeHeadlineFromChain(stockId) {
+  const chain = NEWS_CHAINS[stockId];
+  if (!chain || chain.length === 0) return null;
+  return chain[Math.floor(Math.random() * chain.length)].headline;
+}
+
+function buildPremarketHeadline(stockId, positive) {
+  return pickMemeHeadlineForPolarity(stockId, positive);
 }
 
 /** 다음 거래일 08:00 진입 시: 종목별 호·악 뉴스 건수 및 08:00~08:50 분 단위 스케줄 */
@@ -2341,7 +2300,7 @@ function generatePremarketNewsPlan() {
 
   const events = [];
   STOCK_SPECS.forEach((spec) => {
-    if (spec.kind === "etf") {
+    if (spec.kind === "etf" || spec.kind === "reit") {
       premarketNewsCounts[spec.id] = { pos: 0, neg: 0 };
       return;
     }
@@ -2406,11 +2365,7 @@ function releasePremarketNewsForMinute(minute) {
 }
 
 function buildAfterHoursHeadline(stockId, positive) {
-  const s = getStockById(stockId);
-  const name = s ? s.name : stockId;
-  return positive
-    ? `[시간외] ${name} — 호재 속보가 유통됩니다`
-    : `[시간외] ${name} — 악재 속보가 유통됩니다`;
+  return pickMemeHeadlineForPolarity(stockId, positive);
 }
 
 /** 15:30~16:30 시간외 뉴스 스케줄(당일 1회 생성) */
@@ -2419,7 +2374,7 @@ function generateAfterHoursNewsPlan() {
   afterHoursNewsScheduleByMin = {};
   const events = [];
   STOCK_SPECS.forEach((spec) => {
-    if (spec.kind === "etf") {
+    if (spec.kind === "etf" || spec.kind === "reit") {
       afterHoursNewsCounts[spec.id] = { pos: 0, neg: 0 };
       return;
     }
@@ -3584,16 +3539,11 @@ function tryEmitExtraRumorChatter() {
   if (tutorialGateActive) return;
   if (!isTradingWindowActive()) return;
   if (Math.random() >= 0.14) return;
-  const s = stocks[Math.floor(Math.random() * stocks.length)];
-  if (!s) return;
-  const lines = [
-    () => `[소문] ${s.name} — 거래소 인근에서 '큰 손' 이야기만 무성합니다`,
-    () => `[익명] ${s.name} 관련 내부 메모가 돌고 있다는 말이 나옵니다`,
-    () => `${s.name} — 실적 시즌 전 '깜짝 변수' 거론되나 확인 불가`,
-    () => `[현장] ${s.name} 앞 증권가 TV에 단골 애널리스트가 잠복 중이랍니다`,
-    () => `[단톡] ${s.name} — 지인의 지인의 펀드매니저가 뭐라던데…`,
-  ];
-  const line = lines[Math.floor(Math.random() * lines.length)]();
+  const pool = stocks.filter((s) => memeNewsEligibleSpec(s));
+  if (pool.length === 0) return;
+  const s = pool[Math.floor(Math.random() * pool.length)];
+  const line = randomMemeHeadlineFromChain(s.id);
+  if (!line) return;
   addNewsItem(line, "ambient", "", { stockId: s.id, is_rumor: true });
 }
 
@@ -3602,7 +3552,7 @@ function tryFireChainNews(completedCandleCount) {
     const sched = CHAIN_SCHEDULE[stockId];
     if (!sched) return;
     const step = chainStepByStock[stockId];
-    if (step >= sched.length || newsCountByStock[stockId] >= 3) return;
+    if (step >= sched.length || newsCountByStock[stockId] >= 6) return;
     if (completedCandleCount !== sched[step]) return;
 
     const story = NEWS_CHAINS[stockId][step];
@@ -3613,18 +3563,8 @@ function tryFireChainNews(completedCandleCount) {
     newsCountByStock[stockId] += 1;
   });
 }
-
-/** 보조 속보 — 간격 길게, 관심 종목 가중 */
-const AMBIENT_NEWS_TEMPLATES = [
-  (name) => `[현장] ${name} — 거래대금 상위권, 체결 밀도가 두드러진 구간`,
-  (name) => `[증권가] ${name} 수급 이슈로 매매대금 주목`,
-  (name) => `[분석] ${name} 차입·사업 구조 점검 리포트 확산`,
-  (name) => `[보도] ${name} 공급·수요 밸런스 재평가 분위기`,
-  (name) => `[이슈] ${name} 업황·실적 가시성에 시선 분산`,
-];
-
 function pickStockIdForAmbientNews() {
-  const wl = watchlistIds.filter((id) => getStockById(id));
+  const wl = watchlistIds.filter((id) => memeNewsEligibleId(id));
   if (wl.length === 0) return null;
   return wl[Math.floor(Math.random() * wl.length)];
 }
@@ -3635,14 +3575,10 @@ function scheduleAmbientNewsTimer() {
   newsTimeoutId = setTimeout(() => {
     if (isTradingSession()) {
       const sid = pickStockIdForAmbientNews();
-      const s = sid ? getStockById(sid) : null;
-      if (s) {
-        const tpl =
-          AMBIENT_NEWS_TEMPLATES[
-            Math.floor(Math.random() * AMBIENT_NEWS_TEMPLATES.length)
-          ];
+      const line = sid ? randomMemeHeadlineFromChain(sid) : null;
+      if (sid && line) {
         const asRumor = rollIsRumor();
-        addNewsItem(tpl(s.name), "ambient", "", {
+        addNewsItem(line, "ambient", "", {
           stockId: sid,
           is_rumor: asRumor,
         });
@@ -4182,7 +4118,7 @@ function refreshPortfolioTableCells() {
     const evalVal = owned * s.price;
     const pl = Math.round(evalVal - cb);
     const plCls = pl > 0 ? "chg-up" : pl < 0 ? "chg-down" : "chg-flat";
-    plTd.className = plCls;
+    plTd.className = `${plCls} portfolio-pl-cell`;
     plTd.textContent =
       owned > 0 ? `${pl >= 0 ? "+" : ""}${formatWon(pl)}` : "—";
   });
@@ -4301,6 +4237,7 @@ function fireDueCalendarEvents() {
     ev.fired = true;
     addNewsItem(`[경제 일정] ${ev.title}`, "calendar", "", {
       stockId: ev.targets?.[0],
+      global: true,
     });
     setMessage(`경제 일정 · ${ev.title}`, "ok");
     applyCalendarEventPayload(ev);
@@ -4553,45 +4490,39 @@ function renderStocks() {
         <span class="stock-name">${escapeHtml(s.name)}</span>
         <span class="stock-ticker">${escapeHtml(s.id)}</span>
       </td>
-      <td><span data-portfolio-price="${escapeHtml(s.id)}" class="watch-price">${formatStockWon(s.price)}</span></td>
+      <td class="td-portfolio-price"><span data-portfolio-price="${escapeHtml(s.id)}" class="watch-price portfolio-price-cell">${formatStockWon(s.price)}</span></td>
       <td>${owned > 0 ? formatStockWon(avg) : "—"}</td>
       <td>${owned > 0 ? formatShares(owned) : "—"}</td>
-      <td class="${plCls}" data-portfolio-pl="${escapeHtml(s.id)}">${owned > 0 ? `${pl >= 0 ? "+" : ""}${formatWon(pl)}` : "—"}</td>
+      <td class="${plCls} portfolio-pl-cell" data-portfolio-pl="${escapeHtml(s.id)}">${owned > 0 ? `${pl >= 0 ? "+" : ""}${formatWon(pl)}` : "—"}</td>
       <td class="cell-qty-portfolio">
-        <input type="number" class="qty-input" min="0" step="1" value="1" data-stock="${escapeHtml(s.id)}" aria-label="${escapeHtml(s.name)} 수량" />
+        <input type="number" class="qty-input portfolio-qty-input" min="0" step="1" value="1" data-stock="${escapeHtml(s.id)}" aria-label="${escapeHtml(s.name)} 수량" inputmode="numeric" />
         <div class="portfolio-qty-quick">
-          <button type="button" class="btn-mts ghost btn-qty-quick" data-portfolio-max="${escapeHtml(s.id)}">MAX</button>
-          <button type="button" class="btn-mts ghost btn-qty-quick" data-portfolio-sellall="${escapeHtml(s.id)}">전량</button>
+          <button type="button" class="btn-mts ghost btn-qty-quick btn-portfolio-smart" data-portfolio-smart="${escapeHtml(s.id)}" title="보유 시: 전량 매도 수량 · 미보유 시: 예수금 풀매수 수량">전량</button>
         </div>
       </td>
-      <td class="cell-actions">
-        <button type="button" class="btn-mts buy" data-action="buy" data-stock="${escapeHtml(s.id)}">매수</button>
-        <button type="button" class="btn-mts sell" data-action="sell" data-stock="${escapeHtml(s.id)}">매도</button>
+      <td class="cell-actions cell-actions-portfolio">
+        <button type="button" class="btn-mts buy btn-portfolio-trade" data-action="buy" data-stock="${escapeHtml(s.id)}">매수</button>
+        <button type="button" class="btn-mts sell btn-portfolio-trade" data-action="sell" data-stock="${escapeHtml(s.id)}">매도</button>
       </td>
     `;
     tbody.appendChild(tr);
   });
 
-  tbody.querySelectorAll("[data-portfolio-max]").forEach((b) => {
+  tbody.querySelectorAll("[data-portfolio-smart]").forEach((b) => {
     b.addEventListener("click", (e) => {
       e.stopPropagation();
-      const id = b.getAttribute("data-portfolio-max");
+      const id = b.getAttribute("data-portfolio-smart");
       const st = getStockById(id);
       const row = b.closest("tr");
       const input = row?.querySelector(".qty-input");
       if (!st || !input || st.price <= 0) return;
-      const q = maxBuySharesForCash(game.cash, st.price);
-      input.value = q > 0 ? String(q) : "0";
-    });
-  });
-  tbody.querySelectorAll("[data-portfolio-sellall]").forEach((b) => {
-    b.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const id = b.getAttribute("data-portfolio-sellall");
-      const row = b.closest("tr");
-      const input = row?.querySelector(".qty-input");
       const sh = Math.max(0, Math.floor(Number(game.holdings[id] ?? 0)));
-      if (input) input.value = sh > 0 ? String(sh) : "0";
+      if (sh > 0) {
+        input.value = String(sh);
+      } else {
+        const q = maxBuySharesForCash(game.cash, st.price);
+        input.value = q > 0 ? String(q) : "0";
+      }
     });
   });
 

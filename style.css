@@ -1015,6 +1015,53 @@ body {
   color: var(--text-dim) !important;
 }
 
+/* 속보 피드 — 높이 제한 + 내부 스크롤 (최신 5~6개 분량) */
+.news-feed-scroll-wrap {
+  position: relative;
+  max-height: min(48vh, 340px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: 6px 4px 8px 2px;
+  margin: 0 -2px;
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.12);
+  box-shadow:
+    inset 0 14px 16px -12px rgba(5, 8, 14, 0.92),
+    inset 0 -14px 16px -12px rgba(5, 8, 14, 0.88);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.news-feed-scroll-wrap::-webkit-scrollbar {
+  width: 3px;
+}
+
+.news-feed-scroll-wrap::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 10px 0;
+}
+
+.news-feed-scroll-wrap::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 100px;
+}
+
+.news-feed-scroll-wrap::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.32);
+}
+
+@media (min-width: 480px) {
+  .news-feed-scroll-wrap {
+    max-height: min(44vh, 380px);
+  }
+}
+
+.news-feed-scroll-wrap .news-feed--phone .news-item {
+  margin-bottom: 0;
+}
+
 .news-feed {
   list-style: none;
   margin: 0;
@@ -1265,6 +1312,92 @@ body {
   border-radius: 12px;
   overflow-x: auto;
   background: var(--bg-elevated);
+}
+
+/* 내 투자 테이블 — 행 여백·강조 컬러·터치 영역 */
+.portfolio-table-wrap .stock-table th,
+.portfolio-table-wrap .stock-table td {
+  padding: 14px 12px;
+  vertical-align: middle;
+}
+
+.portfolio-table-wrap .stock-table th {
+  padding: 12px 10px;
+  font-size: 0.65rem;
+}
+
+.portfolio-table-wrap .portfolio-price-cell {
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.portfolio-table-wrap td.portfolio-pl-cell {
+  font-size: 0.92rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.portfolio-table-wrap td.portfolio-pl-cell.chg-up {
+  color: #ff2d4a;
+}
+
+.portfolio-table-wrap td.portfolio-pl-cell.chg-down {
+  color: #2f7bff;
+}
+
+.portfolio-table-wrap td.portfolio-pl-cell.chg-flat {
+  color: rgba(200, 210, 230, 0.88);
+  font-weight: 600;
+}
+
+.portfolio-table-wrap .cell-qty-portfolio {
+  min-width: 6.75rem;
+}
+
+.portfolio-table-wrap .cell-qty-portfolio .portfolio-qty-quick {
+  margin-top: 8px;
+}
+
+.portfolio-table-wrap .portfolio-qty-input {
+  width: 100%;
+  min-width: 4.25rem;
+  max-width: 7.5rem;
+  min-height: 44px;
+  padding: 10px 12px;
+  font-size: 0.88rem;
+  border-radius: 10px;
+  box-sizing: border-box;
+}
+
+.portfolio-table-wrap .btn-portfolio-smart {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 14px;
+  font-size: 0.76rem;
+  font-weight: 700;
+  border-radius: 10px;
+}
+
+.portfolio-table-wrap .cell-actions-portfolio {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  gap: 8px;
+  align-items: stretch;
+  min-width: 7.25rem;
+}
+
+.portfolio-table-wrap .cell-actions-portfolio .btn-portfolio-trade {
+  width: auto;
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  padding: 10px 8px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  border-radius: 10px;
 }
 
 .stock-table {
@@ -2039,7 +2172,8 @@ body {
 
 .portfolio-qty-quick {
   display: flex;
-  gap: 6px;
+  flex-direction: column;
+  gap: 0;
   margin-top: 6px;
 }
 
