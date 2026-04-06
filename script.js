@@ -26,6 +26,53 @@ const RUMOR_FRACTION = 0.3;
 function rollIsRumor() {
   return Math.random() < RUMOR_FRACTION;
 }
+
+/** 찌라시(is_rumor) UI 위장용 — 저장·엔진 로직은 is_rumor 플래그만 사용 */
+const RUMOR_DISPLAY_FAKE_TAGS = [
+  "[속보]",
+  "[단독]",
+  "[특징주]",
+  "[마감전]",
+  "[긴급]",
+  "[특종]",
+];
+
+function stableHashForNewsDisplay(it) {
+  const key = `${it.ts || ""}|${it.gameDayIndex ?? ""}|${it.gameMinutes ?? ""}|${it.text || ""}|${it.stockId || ""}|${it.type || ""}`;
+  let h = 0;
+  for (let i = 0; i < key.length; i += 1) {
+    h = (h * 31 + key.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h);
+}
+
+/** 선행 `[태그]` 나열 제거 — 찌라시 위장 시 한 번만 일반 헤드라인 태그를 붙이기 위함 */
+function stripLeadingBracketTags(s) {
+  let t = String(s).trim();
+  while (/^\[[^\]]+\]/.test(t)) {
+    t = t.replace(/^\[[^\]]+\]\s*/, "").trimStart();
+  }
+  return t;
+}
+
+/**
+ * 뉴스 목록·상세 표시문. `is_rumor`일 때만 텍스트를 가공하며, 원본 `it.text`는 바꾸지 않음.
+ */
+function newsTextForDisplay(it) {
+  const raw = it?.text ?? "";
+  if (!it || it.is_rumor !== true) {
+    return raw;
+  }
+  let body = String(raw).replace(/찌라시/g, "");
+  body = stripLeadingBracketTags(body);
+  body = body.replace(/\s{2,}/g, " ").trim();
+  const tag =
+    RUMOR_DISPLAY_FAKE_TAGS[
+      stableHashForNewsDisplay(it) % RUMOR_DISPLAY_FAKE_TAGS.length
+    ];
+  if (!body) return tag;
+  return `${tag} ${body}`;
+}
 const NEXT_TRADING_DAY_DELAY_MS = 2200;
 const INITIAL_CAPITAL = 1_000_000;
 /** 게임 캘린더 매월 1일 자동 입금 */
@@ -47,17 +94,23 @@ const TICKS_PER_CANDLE = 10;
 const DIVIDEND_EVERY_CANDLES = 4;
 
 const MARKET_OPEN_MIN = 9 * 60;
-const MARKET_CLOSE_MIN = 15 * 60 + 30;
+/** 정규장 종가(가격 틱·시장가 매매 종료) 15:30 */
+const MARKET_REGULAR_CLOSE_MIN = 15 * 60 + 30;
+/** 장 운영 종료(시간외 종료) 16:30 — 이후 다음날 프리마켓 */
+const MARKET_CLOSE_MIN = 16 * 60 + 30;
 /** 게임 캘린더 하루(분) — 캔들 X축 순서·기간 필터 (실시간 시계와 무관) */
 const GAME_MINUTES_PER_DAY = 24 * 60;
-/** 장 시작 전 대기(프리마켓) — 08:00~09:00, 매매 불가 · 시계만 진행 */
+/** 장 시작 전 대기(프리마켓) — 08:00~09:00, 시장가 불가 · 지정가 예약 가능 */
 const PREMARKET_START_MIN = 8 * 60;
 /** 08:00~08:50(게임분 480~529): 프리마켓 뉴스 폭격 구간 */
 const PREMARKET_NEWS_END_MIN = 8 * 60 + 50;
-/** Net Impact 1당 전일 종가 대비 시초가 변동률(±) */
-const GAP_PCT_PER_NET_IMPACT = 0.05;
-/** 09:00~15:30 = 390게임분 = 현실 390초(6분30초), 10분봉 39개 */
-const SESSION_GAME_MINUTES = MARKET_CLOSE_MIN - MARKET_OPEN_MIN;
+/** 15:30~16:30 시간외 뉴스 스케줄(분) */
+const AFTER_HOURS_NEWS_START_MIN = MARKET_REGULAR_CLOSE_MIN;
+const AFTER_HOURS_NEWS_END_MIN = MARKET_CLOSE_MIN;
+/** Net Impact 1당 전일 종가 대비 시초가 변동률(±) — 누적 뉴스로 갭 강화 */
+const GAP_PCT_PER_NET_IMPACT = 0.14;
+/** 09:00~15:30 정규장 = 390게임분, 10분봉 39개 */
+const SESSION_GAME_MINUTES = MARKET_REGULAR_CLOSE_MIN - MARKET_OPEN_MIN;
 const CANDLES_PER_SESSION = SESSION_GAME_MINUTES / CANDLE_GAME_MINUTES;
 
 /** 온라인: 현실 10초마다 클라이언트가 리더 선출 후 DB 갱신(게임 내 10분봉 1개분과 동일) */
@@ -75,6 +128,8 @@ let playerProfile = {
   setupComplete: false,
   /** `"2000-4"` 형태 — 해당 월 1일 월급 지급 여부 */
   lastSalaryMonthKey: "",
+  /** 고배당 리츠 월별 배당(1일 1회) */
+  lastReitDivMonthKey: "",
 };
 
 let gameClockEverStarted = false;
@@ -84,6 +139,8 @@ let newsFeedRevealTimers = [];
 
 /** 상세 매매: 주 단위 | 원화 금액(체결 수량은 시가로 환산) */
 let detailTradeInputMode = "shares";
+/** market | limit — 시장가는 정규장만, 지정가는 정규+시간외 */
+let detailTradeOrderType = "market";
 /** 상세 패널 미리보기: 마지막으로 누른 매수/매도 */
 let lastDetailTradeAction = "buy";
 
@@ -155,6 +212,22 @@ const STOCK_SPECS = [
     desc: "종합 비즈니스 솔루션 플랫폼.",
     price: 10_000,
     chartColor: "#22d3ee",
+  },
+  {
+    id: "GDR",
+    name: "고배당 리츠",
+    desc: "저변동·횡보 위주. 매월 1일 보유 가치의 일부가 배당으로 지급됩니다.",
+    price: 10_000,
+    chartColor: "#94a3b8",
+    kind: "reit",
+  },
+  {
+    id: "MIX",
+    name: "시장종합 ETF",
+    desc: "일반 종목 평균가 추종. 개별 뉴스·급등락 스파이크 없음.",
+    price: 10_000,
+    chartColor: "#64748b",
+    kind: "etf",
   },
 ];
 
@@ -300,6 +373,12 @@ function emptyPremarketNewsCounts() {
 let premarketNewsCounts = emptyPremarketNewsCounts();
 /** 당일 프리마켓 뉴스 스케줄(분 → 이벤트) — 롤오버 시 생성 */
 let premarketNewsScheduleByMin = {};
+/** 전일 시간외 + 당일 프리마켓 뉴스 누적(호·악) — 09:00 갭에 합산 */
+let afterHoursNewsCounts = emptyPremarketNewsCounts();
+/** 15:30~16:30 시간외 뉴스 스케줄(분 → 이벤트) */
+let afterHoursNewsScheduleByMin = {};
+/** 당일 시간외 뉴스 스케줄 생성 여부 */
+let afterHoursPlanGeneratedToday = false;
 /** 09:00 시초가 갭 반영 여부(하루 1회) */
 let openingGapAppliedToday = false;
 
@@ -312,29 +391,56 @@ const stocks = STOCK_SPECS.map((spec) => ({
   ...spec,
 }));
 
+function stockSpecById(id) {
+  return STOCK_SPECS.find((s) => s.id === id);
+}
+function isEtfId(id) {
+  return stockSpecById(id)?.kind === "etf";
+}
+function isReitId(id) {
+  return stockSpecById(id)?.kind === "reit";
+}
+
+/** 지정가 예약 주문 (클라이언트 + profile JSON 동기화) */
+let pendingOrders = [];
+
 /** 종목별 '진짜 뉴스' 후 급등·급락 틱 잔여 횟수(다음 시세 틱에서 소모) */
 let newsSpikeTicksLeft = emptyChainState();
 /** 종목별 급등(1) / 급락(-1) */
 let newsSpikeDirection = Object.fromEntries(
   STOCK_SPECS.map((s) => [s.id, 1])
 );
+/** 극호재/극악재 등 스파이크 모드 */
+let newsSpikeMode = Object.fromEntries(
+  STOCK_SPECS.map((s) => [s.id, "normal"])
+);
 
 function resetNewsSpikeState() {
   newsSpikeTicksLeft = emptyChainState();
   STOCK_SPECS.forEach((s) => {
     newsSpikeDirection[s.id] = 1;
+    newsSpikeMode[s.id] = "normal";
   });
 }
 
 /** 체이닝·일정 등: 페이로드 impact 부호로 방향만 쓰고, 3~5틱 급등·급락 스케줄 */
 function scheduleNewsSpikeForStock(stockId, directionSign) {
-  if (!getStockById(stockId)) return;
+  if (!getStockById(stockId) || isEtfId(stockId)) return;
   const ticks = 3 + Math.floor(Math.random() * 3);
   newsSpikeTicksLeft[stockId] = Math.max(
     newsSpikeTicksLeft[stockId] || 0,
     ticks
   );
   newsSpikeDirection[stockId] = directionSign >= 0 ? 1 : -1;
+  newsSpikeMode[stockId] = "normal";
+}
+
+/** 극호재(5~10배)·극악재(~1/10) — ETF 제외, 희귀 이벤트 */
+function rollExtremeNewsKnock(stockId, positive) {
+  if (!getStockById(stockId) || isEtfId(stockId)) return;
+  newsSpikeTicksLeft[stockId] = Math.max(newsSpikeTicksLeft[stockId] || 0, 1);
+  newsSpikeDirection[stockId] = positive ? 1 : -1;
+  newsSpikeMode[stockId] = positive ? "extremeBull" : "extremeBear";
 }
 
 function scheduleNewsSpikeFromImpacts(impacts) {
@@ -342,6 +448,7 @@ function scheduleNewsSpikeFromImpacts(impacts) {
   Object.entries(impacts).forEach(([id, raw]) => {
     const imp = Number(raw);
     if (!imp || !Number.isFinite(imp)) return;
+    if (isEtfId(id)) return;
     scheduleNewsSpikeForStock(id, imp > 0 ? 1 : -1);
   });
 }
@@ -428,13 +535,44 @@ function maybeApplyMonthlySalary() {
   const ctx = getMonthContextForDayIndex(gameDayIndex);
   const mk = ctx.monthKey;
   if (day !== 1) return;
-  if (playerProfile.lastSalaryMonthKey === mk) return;
-  game.cash += MONTHLY_SALARY;
-  playerProfile.lastSalaryMonthKey = mk;
-  addNewsItem(`월급 입금 ${formatWon(MONTHLY_SALARY)} (매월 1일 자동)`, "salary", "", {
-    global: true,
-  });
-  setMessage(`월급 ${formatWon(MONTHLY_SALARY)}이 입금되었습니다.`, "ok");
+  if (playerProfile.lastSalaryMonthKey !== mk) {
+    game.cash += MONTHLY_SALARY;
+    playerProfile.lastSalaryMonthKey = mk;
+    addNewsItem(`월급 입금 ${formatWon(MONTHLY_SALARY)} (매월 1일 자동)`, "salary", "", {
+      global: true,
+    });
+    setMessage(`월급 ${formatWon(MONTHLY_SALARY)}이 입금되었습니다.`, "ok");
+    schedulePersistUser();
+  }
+  maybeApplyReitMonthlyDividend();
+}
+
+const REIT_MONTHLY_DIVIDEND_RATE = 0.03;
+
+function maybeApplyReitMonthlyDividend() {
+  const { day } = getCalendarParts(gameDayIndex);
+  if (day !== 1) return;
+  const ctx = getMonthContextForDayIndex(gameDayIndex);
+  const mk = ctx.monthKey;
+  if (playerProfile.lastReitDivMonthKey === mk) return;
+  playerProfile.lastReitDivMonthKey = mk;
+  const q = Math.max(0, Math.floor(Number(game.holdings.GDR ?? 0)));
+  if (q <= 0) {
+    schedulePersistUser();
+    return;
+  }
+  const s = getStockById("GDR");
+  if (!s) return;
+  const val = q * s.price;
+  const div = Math.round(val * REIT_MONTHLY_DIVIDEND_RATE);
+  if (div <= 0) return;
+  game.cash += div;
+  addNewsItem(
+    `[고배당 리츠] 월 배당 ${formatWon(div)} (보유 가치의 ${(REIT_MONTHLY_DIVIDEND_RATE * 100).toFixed(0)}%)`,
+    "dividend",
+    "",
+    { stockId: "GDR", global: true }
+  );
   schedulePersistUser();
 }
 
@@ -447,12 +585,15 @@ function matchesMainNewsFilter(it) {
 }
 
 function syncTradeButtons() {
-  const canTrade = isTradingWindowActive() && !isTradeBlockedByPenalty();
+  const canMarket =
+    isRegularSession() && !isTradeBlockedByPenalty();
+  const canLimit =
+    isLimitOrderWindowAllowed() && !isTradeBlockedByPenalty();
   ["detailBtnBuy", "detailBtnSell"].forEach((id) => {
     const el = document.getElementById(id);
     if (el) {
-      el.disabled = !canTrade;
-      el.classList.toggle("is-trade-locked", !canTrade);
+      el.disabled = !canMarket;
+      el.classList.toggle("is-trade-locked", !canMarket);
     }
   });
   document.querySelectorAll("#stockRows button[data-action]").forEach((btn) => {
@@ -780,6 +921,20 @@ async function loadUserFromServer() {
     playerProfile.lastSalaryMonthKey =
       getMonthContextForDayIndex(gameDayIndex).monthKey;
   }
+  playerProfile.lastReitDivMonthKey =
+    typeof prof.lastReitDivMonthKey === "string" ? prof.lastReitDivMonthKey : "";
+  pendingOrders = Array.isArray(prof.pendingOrders)
+    ? prof.pendingOrders.filter(
+        (o) =>
+          o &&
+          typeof o.id === "string" &&
+          typeof o.symbol === "string" &&
+          STOCK_SPECS.some((s) => s.id === o.symbol) &&
+          (o.side === "buy" || o.side === "sell") &&
+          Number.isFinite(Number(o.limitPrice)) &&
+          Number.isFinite(Number(o.qty))
+      )
+    : [];
   watchlistIds = Array.isArray(prof.watchlist)
     ? prof.watchlist.filter((id) => STOCK_SPECS.some((s) => s.id === id))
     : [];
@@ -860,7 +1015,7 @@ function renderNewsFeedFromServer(items) {
     if (tagWrap.childNodes.length > 0) body.appendChild(tagWrap);
     const textEl = document.createElement("span");
     textEl.className = "news-text";
-    textEl.textContent = it.text || "";
+    textEl.textContent = newsTextForDisplay(it);
     body.appendChild(textEl);
     li.appendChild(timeEl);
     li.appendChild(body);
@@ -924,6 +1079,31 @@ function applyServerMarketState(m) {
       newsSpikeDirection[spec.id] = v === -1 ? -1 : 1;
     });
   }
+  if (m.newsSpikeMode && typeof m.newsSpikeMode === "object") {
+    STOCK_SPECS.forEach((spec) => {
+      const v = m.newsSpikeMode[spec.id];
+      newsSpikeMode[spec.id] =
+        v === "extremeBull" || v === "extremeBear" ? v : "normal";
+    });
+  }
+  afterHoursNewsCounts = emptyPremarketNewsCounts();
+  if (m.afterHoursNewsCounts && typeof m.afterHoursNewsCounts === "object") {
+    STOCK_SPECS.forEach((spec) => {
+      const p = m.afterHoursNewsCounts[spec.id];
+      if (p && typeof p.pos === "number" && typeof p.neg === "number") {
+        afterHoursNewsCounts[spec.id] = { pos: p.pos, neg: p.neg };
+      }
+    });
+  }
+  afterHoursNewsScheduleByMin =
+    m.afterHoursNewsScheduleByMin &&
+    typeof m.afterHoursNewsScheduleByMin === "object"
+      ? { ...m.afterHoursNewsScheduleByMin }
+      : {};
+  afterHoursPlanGeneratedToday =
+    typeof m.afterHoursPlanGeneratedToday === "boolean"
+      ? m.afterHoursPlanGeneratedToday
+      : false;
   dividendCandleCounter = m.dividendCandleCounter ?? 0;
   sessionCandleCount = m.sessionCandleCount ?? 0;
   tickInCandle = m.tickInCandle ?? 0;
@@ -934,6 +1114,7 @@ function applyServerMarketState(m) {
     if (!s) return;
     s.price = clampStockPrice(row.price);
   });
+  syncEtfPriceFromMarket();
 
   STOCK_SPECS.forEach((spec) => {
     const id = spec.id;
@@ -1098,6 +1279,10 @@ function serializeMarketState() {
     chainStepByStock: { ...chainStepByStock },
     newsSpikeTicksLeft: { ...newsSpikeTicksLeft },
     newsSpikeDirection: { ...newsSpikeDirection },
+    newsSpikeMode: { ...newsSpikeMode },
+    afterHoursNewsCounts: JSON.parse(JSON.stringify(afterHoursNewsCounts)),
+    afterHoursNewsScheduleByMin: { ...afterHoursNewsScheduleByMin },
+    afterHoursPlanGeneratedToday,
     dividendCandleCounter,
     sessionCandleCount,
     tickInCandle,
@@ -1133,6 +1318,7 @@ function advanceOneGameMinuteOnline() {
     if (gameMinutes === MARKET_OPEN_MIN) {
       applyOpeningGapFromPremarket();
     }
+    processPendingOrdersMatch();
     return;
   }
 
@@ -1145,22 +1331,44 @@ function advanceOneGameMinuteOnline() {
     return;
   }
 
-  beginCandlePeriodIfNeeded();
-  oneMicroPriceStep();
-  stocks.forEach((s) => {
-    const b = candleOhlcBuffer[s.id];
-    if (b) {
-      b.h = Math.max(b.h, s.price);
-      b.l = Math.min(b.l, s.price);
+  if (gameMinutes >= MARKET_OPEN_MIN && gameMinutes < MARKET_REGULAR_CLOSE_MIN) {
+    beginCandlePeriodIfNeeded();
+    oneMicroPriceStep();
+    stocks.forEach((s) => {
+      const b = candleOhlcBuffer[s.id];
+      if (b) {
+        b.h = Math.max(b.h, s.price);
+        b.l = Math.min(b.l, s.price);
+      }
+    });
+    gameMinutes += GAME_MINUTES_PER_REAL_SEC;
+    tickInCandle += 1;
+    if (tickInCandle >= TICKS_PER_CANDLE) {
+      sealCurrentCandleAndReset();
     }
-  });
-  gameMinutes += GAME_MINUTES_PER_REAL_SEC;
-  tickInCandle += 1;
-  if (tickInCandle >= TICKS_PER_CANDLE) {
-    sealCurrentCandleAndReset();
+    processPendingOrdersMatch();
+    if (gameMinutes >= MARKET_CLOSE_MIN) {
+      closeMarketOnline();
+    }
+    return;
   }
-  if (gameMinutes >= MARKET_CLOSE_MIN) {
-    closeMarketOnline();
+
+  if (isAfterHoursSession()) {
+    if (gameMinutes === MARKET_REGULAR_CLOSE_MIN) {
+      if (tickInCandle > 0) {
+        sealCurrentCandleAndReset();
+      }
+      if (!afterHoursPlanGeneratedToday) {
+        generateAfterHoursNewsPlan();
+        afterHoursPlanGeneratedToday = true;
+      }
+    }
+    releaseAfterHoursNewsForMinute(gameMinutes);
+    gameMinutes += GAME_MINUTES_PER_REAL_SEC;
+    processPendingOrdersMatch();
+    if (gameMinutes >= MARKET_CLOSE_MIN) {
+      closeMarketOnline();
+    }
   }
 }
 
@@ -1190,6 +1398,7 @@ function openNextTradingDayOnline() {
   resetDailyNewsState();
   generatePremarketNewsPlan();
   dividendCandleCounter = 0;
+  afterHoursPlanGeneratedToday = false;
   resetNewsSpikeState();
   ensureCalendarHorizon();
   fireDueCalendarEvents();
@@ -1290,6 +1499,7 @@ async function maybeAdvanceOnlineMarketAsLeader() {
     renderAssetSummary();
     syncNextTurnButton();
     syncTradeButtons();
+    processPendingOrdersMatch();
     reflowGameScreenUi();
   } catch (e) {
     console.warn("maybeAdvanceOnlineMarketAsLeader", e);
@@ -1411,6 +1621,8 @@ async function persistUserNow() {
         setupComplete: playerProfile.setupComplete,
         watchlist: watchlistIds,
         lastSalaryMonthKey: playerProfile.lastSalaryMonthKey || "",
+        lastReitDivMonthKey: playerProfile.lastReitDivMonthKey || "",
+        pendingOrders,
       },
       updated_at: new Date().toISOString(),
     })
@@ -1964,9 +2176,19 @@ function newsItemSortKey(it) {
   return 0;
 }
 
-/** 정규 매매 구간 09:00~15:30 (게임 분 기준) */
+/** 정규장 09:00~15:30 — 시장가·실시간 시세 틱 */
+function isRegularSession() {
+  return gameMinutes >= MARKET_OPEN_MIN && gameMinutes < MARKET_REGULAR_CLOSE_MIN;
+}
+/** 시간외 15:30~16:30 — 가격 틱 없음, 지정가 예약만 */
+function isAfterHoursSession() {
+  return (
+    gameMinutes >= MARKET_REGULAR_CLOSE_MIN && gameMinutes < MARKET_CLOSE_MIN
+  );
+}
+/** 정규 매매 구간(시장가) — 구 코드 호환명 */
 function isTradingWindowActive() {
-  return gameMinutes >= MARKET_OPEN_MIN && gameMinutes < MARKET_CLOSE_MIN;
+  return isRegularSession();
 }
 
 /** 08:00~09:00 장 시작 전(프리마켓 대기) */
@@ -1976,12 +2198,12 @@ function isPreMarketWindow() {
 
 function shouldAdvanceMarketClock() {
   if (awaitingDayRoll) return false;
-  return isPreMarketWindow() || isTradingWindowActive();
+  return isPreMarketWindow() || isRegularSession() || isAfterHoursSession();
 }
 
-/** 다음 턴(1년) — 정규 장중이 아닐 때만 */
+/** 다음 턴(1년) — 정규·시간외 장이 아닐 때만 */
 function canAdvanceYearTurn() {
-  return !isTradingWindowActive();
+  return !isRegularSession() && !isAfterHoursSession();
 }
 
 function isTradingSession() {
@@ -2029,6 +2251,10 @@ function generatePremarketNewsPlan() {
 
   const events = [];
   STOCK_SPECS.forEach((spec) => {
+    if (spec.kind === "etf") {
+      premarketNewsCounts[spec.id] = { pos: 0, neg: 0 };
+      return;
+    }
     let pos = Math.floor(Math.random() * 5);
     let neg = Math.floor(Math.random() * 5);
     if (pos + neg === 0) {
@@ -2080,18 +2306,89 @@ function releasePremarketNewsForMinute(minute) {
       is_rumor: asRumor,
     });
     if (!asRumor) {
-      scheduleNewsSpikeForStock(ev.stockId, ev.positive ? 1 : -1);
+      if (Math.random() < 0.015) {
+        rollExtremeNewsKnock(ev.stockId, ev.positive);
+      } else {
+        scheduleNewsSpikeForStock(ev.stockId, ev.positive ? 1 : -1);
+      }
+    }
+  });
+}
+
+function buildAfterHoursHeadline(stockId, positive) {
+  const s = getStockById(stockId);
+  const name = s ? s.name : stockId;
+  return positive
+    ? `[시간외] ${name} — 호재 속보가 유통됩니다`
+    : `[시간외] ${name} — 악재 속보가 유통됩니다`;
+}
+
+/** 15:30~16:30 시간외 뉴스 스케줄(당일 1회 생성) */
+function generateAfterHoursNewsPlan() {
+  afterHoursNewsCounts = emptyPremarketNewsCounts();
+  afterHoursNewsScheduleByMin = {};
+  const events = [];
+  STOCK_SPECS.forEach((spec) => {
+    if (spec.kind === "etf") {
+      afterHoursNewsCounts[spec.id] = { pos: 0, neg: 0 };
+      return;
+    }
+    let pos = Math.floor(Math.random() * 4);
+    let neg = Math.floor(Math.random() * 4);
+    if (pos + neg === 0) {
+      if (Math.random() < 0.5) pos += 1;
+      else neg += 1;
+    }
+    afterHoursNewsCounts[spec.id] = { pos, neg };
+    for (let i = 0; i < pos; i += 1) {
+      events.push({ stockId: spec.id, positive: true });
+    }
+    for (let i = 0; i < neg; i += 1) {
+      events.push({ stockId: spec.id, positive: false });
+    }
+  });
+  for (let i = events.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [events[i], events[j]] = [events[j], events[i]];
+  }
+  const minLo = AFTER_HOURS_NEWS_START_MIN;
+  const maxMin = AFTER_HOURS_NEWS_END_MIN - 1;
+  const span = Math.max(1, maxMin - minLo + 1);
+  events.forEach((ev) => {
+    const minute = minLo + Math.floor(Math.random() * span);
+    if (!afterHoursNewsScheduleByMin[minute]) {
+      afterHoursNewsScheduleByMin[minute] = [];
+    }
+    afterHoursNewsScheduleByMin[minute].push(ev);
+  });
+}
+
+function releaseAfterHoursNewsForMinute(minute) {
+  if (
+    minute < AFTER_HOURS_NEWS_START_MIN ||
+    minute >= AFTER_HOURS_NEWS_END_MIN
+  ) {
+    return;
+  }
+  const batch =
+    afterHoursNewsScheduleByMin[minute] ??
+    afterHoursNewsScheduleByMin[String(minute)];
+  if (!batch || batch.length === 0) return;
+  batch.forEach((ev) => {
+    const type = ev.positive ? "afterhours-pos" : "afterhours-neg";
+    const asRumor = rollIsRumor();
+    addNewsItem(buildAfterHoursHeadline(ev.stockId, ev.positive), type, "", {
+      stockId: ev.stockId,
+      is_rumor: asRumor,
+    });
+    if (!asRumor) {
+      /* 시간외: 시세 틱 없음. 갭은 generateAfterHoursNewsPlan 의 pos/neg 누적만 사용 */
     }
   });
 }
 
 function triggerGapOpenAnimation() {
-  const wrap = document.querySelector(".chart-stack");
-  if (!wrap) return;
-  wrap.classList.remove("chart-gap-open-flash");
-  void wrap.offsetWidth;
-  wrap.classList.add("chart-gap-open-flash");
-  setTimeout(() => wrap.classList.remove("chart-gap-open-flash"), 1400);
+  /* 정적 UI — 갭 애니메이션(깜빡임) 제거 */
 }
 
 function updatePremarketChartOverlay() {
@@ -2114,14 +2411,18 @@ function applyOpeningGapFromPremarket() {
   const summaryBits = [];
 
   STOCK_SPECS.forEach((spec) => {
-    const { pos, neg } = premarketNewsCounts[spec.id] || { pos: 0, neg: 0 };
-    const net = pos - neg;
+    if (spec.kind === "etf") return;
+    const p = premarketNewsCounts[spec.id] || { pos: 0, neg: 0 };
+    const a = afterHoursNewsCounts[spec.id] || { pos: 0, neg: 0 };
+    const net = p.pos - p.neg + (a.pos - a.neg);
     const s = getStockById(spec.id);
     if (!s) return;
     const mult = 1 + net * GAP_PCT_PER_NET_IMPACT;
-    s.price = clampStockPrice(s.price * mult);
+    s.price = clampStockPrice(Math.floor(s.price * mult));
     summaryBits.push(`${spec.id} ${net > 0 ? "+" : ""}${net}`);
   });
+  syncEtfPriceFromMarket();
+  summaryBits.push("MIX≈시장평균");
 
   finalizePriceUI(oldPrices);
 
@@ -2140,11 +2441,15 @@ function applyOpeningGapFromPremarket() {
     "",
     { global: true }
   );
-  setMessage("09:00 개장 — 프리마켓 뉴스가 시초가에 반영되었습니다.", "ok");
-  triggerGapOpenAnimation();
+  setMessage(
+    "09:00 개장 — 프리마켓·시간외 뉴스가 시초가에 반영되었습니다.",
+    "ok"
+  );
 
   premarketNewsCounts = emptyPremarketNewsCounts();
   premarketNewsScheduleByMin = {};
+  afterHoursNewsCounts = emptyPremarketNewsCounts();
+  afterHoursNewsScheduleByMin = {};
   updatePremarketChartOverlay();
 }
 
@@ -2171,8 +2476,8 @@ function getStockById(id) {
 /** 튜토리얼 플래그·세션 이름 등 브라우저 캐시 제거(전역 리셋 후 등) */
 function clearStockLifeLocalCaches() {
   try {
-    localStorage.removeItem(LS_TUTORIAL_DONE_KEY);
-    sessionStorage.removeItem(SESSION_LOGIN_NAME_KEY);
+    localStorage.clear();
+    sessionStorage.clear();
   } catch {
     /* ignore */
   }
@@ -2188,10 +2493,8 @@ function showFriendTradeToast(message) {
   }
   textEl.textContent = message;
   root.hidden = false;
-  root.classList.add("friend-trade-toast--flash");
   friendTradeToastTimer = setTimeout(() => {
     root.hidden = true;
-    root.classList.remove("friend-trade-toast--flash");
     friendTradeToastTimer = null;
   }, 2600);
 }
@@ -2426,32 +2729,147 @@ async function sellStock(stockId, quantityRaw, mode = "shares") {
   return { ok: true };
 }
 
+function isLimitOrderWindowAllowed() {
+  return isRegularSession() || isAfterHoursSession();
+}
+
+function renderPendingOrdersUi() {
+  const ul = document.getElementById("detailPendingOrdersList");
+  if (!ul) return;
+  ul.innerHTML = "";
+  if (pendingOrders.length === 0) {
+    const li = document.createElement("li");
+    li.className = "pending-order-empty";
+    li.textContent = "대기 중인 지정가 주문이 없습니다.";
+    ul.appendChild(li);
+    return;
+  }
+  pendingOrders.forEach((o) => {
+    const li = document.createElement("li");
+    li.className = "pending-order-row";
+    const span = document.createElement("span");
+    span.textContent = `${o.symbol} ${o.side === "buy" ? "매수" : "매도"} ${o.qty}주 @ ${formatStockWon(o.limitPrice)}`;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn-mts ghost btn-pending-cancel";
+    btn.textContent = "취소";
+    btn.addEventListener("click", () => {
+      pendingOrders = pendingOrders.filter((x) => x.id !== o.id);
+      renderPendingOrdersUi();
+      schedulePersistUser();
+    });
+    li.appendChild(span);
+    li.appendChild(btn);
+    ul.appendChild(li);
+  });
+}
+
+async function processPendingOrdersMatchAsync() {
+  if (tutorialGateActive || pendingOrders.length === 0) return;
+  const keep = [];
+  for (const o of pendingOrders) {
+    const s = getStockById(o.symbol);
+    if (!s) {
+      keep.push(o);
+      continue;
+    }
+    const hit =
+      o.side === "buy"
+        ? s.price <= o.limitPrice
+        : s.price >= o.limitPrice;
+    if (!hit) {
+      keep.push(o);
+      continue;
+    }
+    const r =
+      o.side === "buy"
+        ? await buyStock(o.symbol, String(o.qty), "shares")
+        : await sellStock(o.symbol, String(o.qty), "shares");
+    if (!r.ok) {
+      keep.push(o);
+      continue;
+    }
+    setMessage(`${o.symbol} 지정가 예약이 체결되었습니다.`, "ok");
+  }
+  pendingOrders = keep;
+  renderPendingOrdersUi();
+  schedulePersistUser();
+}
+
+function processPendingOrdersMatch() {
+  void processPendingOrdersMatchAsync().catch((e) =>
+    console.warn("processPendingOrdersMatch", e)
+  );
+}
+
+/** 일반 종목 평균가 → ETF 1주 가격 (뉴스·개별 틱 없음) */
+function syncEtfPriceFromMarket() {
+  const etf = getStockById("MIX");
+  if (!etf) return;
+  let sum = 0;
+  let n = 0;
+  STOCK_SPECS.forEach((spec) => {
+    if (spec.kind === "etf") return;
+    const st = getStockById(spec.id);
+    if (st) {
+      sum += st.price;
+      n += 1;
+    }
+  });
+  if (n > 0) etf.price = clampStockPrice(Math.floor(sum / n));
+}
+
 /**
  * 평상시: 틱당 -2~+2원 횡보. 진짜 뉴스(스파이크) 구간: 틱당 대폭 상승·하락(원 단위).
+ * REIT: 초저변동. ETF: 별도 동기화.
  */
 function oneMicroPriceStep() {
   stocks.forEach((s) => {
     const id = s.id;
-    let delta = 0;
+    if (isEtfId(id)) return;
     const spikeLeft = newsSpikeTicksLeft[id] ?? 0;
+    const mode = newsSpikeMode[id] || "normal";
     if (spikeLeft > 0) {
       newsSpikeTicksLeft[id] = spikeLeft - 1;
+      if (mode === "extremeBull") {
+        const mult = 5 + Math.random() * 5;
+        s.price = clampStockPrice(Math.floor(s.price * mult));
+        newsSpikeMode[id] = "normal";
+        return;
+      }
+      if (mode === "extremeBear") {
+        const f = 0.05 + Math.random() * 0.05;
+        s.price = clampStockPrice(
+          Math.max(MIN_STOCK_PRICE, Math.floor(s.price * f))
+        );
+        newsSpikeMode[id] = "normal";
+        return;
+      }
       const up = (newsSpikeDirection[id] ?? 1) >= 0;
+      let delta;
       if (up) {
         delta = 20 + Math.floor(Math.random() * 31);
       } else {
         delta = -(20 + Math.floor(Math.random() * 21));
       }
+      s.price = clampStockPrice(s.price + delta);
+      return;
+    }
+    let delta;
+    if (isReitId(id)) {
+      delta = -1 + Math.floor(Math.random() * 3);
     } else {
       delta = -2 + Math.floor(Math.random() * 5);
     }
     s.price = clampStockPrice(s.price + delta);
   });
+  syncEtfPriceFromMarket();
 }
 
 function payDividends() {
   let total = 0;
   stocks.forEach((s) => {
+    if (isReitId(s.id) || isEtfId(s.id)) return;
     const q = game.holdings[s.id] ?? 0;
     if (q <= 0) return;
     total += q * Math.max(1, Math.floor(s.price * 0.00085));
@@ -2563,28 +2981,11 @@ function snapshotPrices() {
   return o;
 }
 
-function flashPriceNode(selector, dir) {
-  const el = document.querySelector(selector);
-  if (!el) return;
-  el.classList.remove("flash-up", "flash-down");
-  void el.offsetWidth;
-  el.classList.add(dir === "up" ? "flash-up" : "flash-down");
-  setTimeout(() => {
-    el.classList.remove("flash-up", "flash-down");
-  }, 700);
-}
-
 function finalizePriceUI(oldPrices) {
   refreshDetailChart();
   renderStockListMain();
   renderAssetSummary();
   stocks.forEach((s) => {
-    const o = oldPrices[s.id];
-    if (o !== undefined && o !== s.price) {
-      const dir = s.price > o ? "up" : "down";
-      flashPriceNode(`[data-watch-price="${s.id}"]`, dir);
-      flashPriceNode(`[data-portfolio-price="${s.id}"]`, dir);
-    }
     prevTickPrice[s.id] = s.price;
   });
 }
@@ -2903,7 +3304,7 @@ function renderDetailStockNewsSection() {
     appendStockNewsTags(tagWrap, it.stockId);
     const p = document.createElement("p");
     p.className = "detail-news-text";
-    p.textContent = it.text || "";
+    p.textContent = newsTextForDisplay(it);
     if (tagWrap.childNodes.length > 0) row.appendChild(tagWrap);
     row.appendChild(p);
     li.appendChild(timeEl);
@@ -2993,15 +3394,6 @@ function updateDetailTradeLivePreview() {
   }
 }
 
-function triggerNewsShake() {
-  const app = document.querySelector(".mts-app");
-  if (!app) return;
-  app.classList.remove("screen-shake");
-  void app.offsetWidth;
-  app.classList.add("screen-shake");
-  setTimeout(() => app.classList.remove("screen-shake"), 450);
-}
-
 function addNewsItem(text, type = "news", subline = "", meta = {}) {
   const gDay = gameDayIndex;
   const gMin = gameMinutes;
@@ -3030,7 +3422,6 @@ function addNewsItem(text, type = "news", subline = "", meta = {}) {
     serverNewsFeedItems.pop();
   }
   renderNewsFeedFromServer(serverNewsFeedItems);
-  triggerNewsShake();
 }
 
 /** 장중 봉 확정 시 가끔 추가 찌라시 한 줄(시세 무관) — 피드만 시끌벅적하게 */
@@ -3043,7 +3434,7 @@ function tryEmitExtraRumorChatter() {
   const lines = [
     () => `[소문] ${s.name} — 거래소 인근에서 '큰 손' 이야기만 무성합니다`,
     () => `[익명] ${s.name} 관련 내부 메모가 돌고 있다는 말이 나옵니다`,
-    () => `[찌라시] ${s.name}, 실적 시즌 전 '깜짝 변수' 거론되나 확인 불가`,
+    () => `${s.name} — 실적 시즌 전 '깜짝 변수' 거론되나 확인 불가`,
     () => `[현장] ${s.name} 앞 증권가 TV에 단골 애널리스트가 잠복 중이랍니다`,
     () => `[단톡] ${s.name} — 지인의 지인의 펀드매니저가 뭐라던데…`,
   ];
@@ -3138,13 +3529,8 @@ function updatePhoneShellClock() {
 
 function renderProfileDisplay() {
   const n = document.getElementById("profileNameDisplay");
-  const a = document.getElementById("profileAgeDisplay");
   const b = document.getElementById("profileBirthDisplay");
   if (n) n.textContent = playerProfile.name?.trim() ? playerProfile.name : "—";
-  if (a) {
-    a.textContent =
-      typeof playerProfile.age === "number" ? `${playerProfile.age}살` : "—";
-  }
   if (b) {
     if (playerProfile.birthday) {
       const d = new Date(`${playerProfile.birthday}T12:00:00`);
@@ -3286,6 +3672,7 @@ async function resetAllLocalDataAndReload() {
   ) {
     return;
   }
+  clearStockLifeLocalCaches();
   if (onlineMode && sb && loginDisplayName) {
     const { error } = await sb.rpc("reset_name_progress", { p_login_name: loginDisplayName });
     if (error) {
@@ -3294,7 +3681,13 @@ async function resetAllLocalDataAndReload() {
     }
   }
   clearSessionName();
-  location.reload();
+  try {
+    const u = new URL(window.location.href);
+    u.searchParams.set("clearLocal", "1");
+    location.href = u.toString();
+  } catch {
+    location.reload();
+  }
 }
 
 function renderStockListMain() {
@@ -3361,16 +3754,7 @@ function updateDetailPriceLine() {
   const s = getStockById(selectedStockId);
   const el = document.getElementById("detailCurrentPrice");
   if (!el || !s) return;
-  const prev = detailLastShownPrice;
   el.textContent = formatStockWon(s.price);
-  if (prev != null && prev !== s.price) {
-    el.classList.remove("detail-price-tick-up", "detail-price-tick-down");
-    void el.offsetWidth;
-    el.classList.add(s.price > prev ? "detail-price-tick-up" : "detail-price-tick-down");
-    window.setTimeout(() => {
-      el.classList.remove("detail-price-tick-up", "detail-price-tick-down");
-    }, 420);
-  }
   detailLastShownPrice = s.price;
 }
 
@@ -3403,6 +3787,10 @@ function openStockDetail(stockId) {
   updatePremarketChartOverlay();
   updateOrderBookAndStrength(stockId);
   syncDetailQtyLabel();
+  const lp = document.getElementById("detailLimitPriceInput");
+  if (lp) lp.value = String(Math.max(MIN_STOCK_PRICE, Math.floor(s.price)));
+  syncDetailOrderTypeUi();
+  renderPendingOrdersUi();
   updateDetailTradeLivePreview();
   renderDetailStockNewsSection();
 }
@@ -3422,6 +3810,15 @@ function syncDetailQtyLabel() {
   if (!lab) return;
   lab.textContent =
     detailTradeInputMode === "won" ? "금액(원)" : "수량(주)";
+}
+
+function syncDetailOrderTypeUi() {
+  const limitRow = document.getElementById("detailLimitPriceRow");
+  if (limitRow) limitRow.hidden = detailTradeOrderType !== "limit";
+  document.querySelectorAll("[data-detail-order-type]").forEach((b) => {
+    const t = b.getAttribute("data-detail-order-type");
+    b.classList.toggle("is-active", t === detailTradeOrderType);
+  });
 }
 
 function bindDetailTrade() {
@@ -3450,6 +3847,18 @@ function bindDetailTrade() {
     });
   });
 
+  document.querySelectorAll("[data-detail-order-type]").forEach((btn) => {
+    if (btn.dataset.bound === "1") return;
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", () => {
+      const t = btn.getAttribute("data-detail-order-type");
+      if (t !== "market" && t !== "limit") return;
+      detailTradeOrderType = t;
+      syncDetailOrderTypeUi();
+      syncTradeButtons();
+    });
+  });
+
   const buyBtn = document.getElementById("detailBtnBuy");
   const sellBtn = document.getElementById("detailBtnSell");
   const qtyInput = document.getElementById("detailQtyInput");
@@ -3465,6 +3874,41 @@ function bindDetailTrade() {
     }
     lastDetailTradeAction = action;
     const raw = qtyInput.value;
+
+    if (detailTradeOrderType === "limit") {
+      if (!isLimitOrderWindowAllowed()) {
+        setMessage("지정가 예약은 정규장·시간외(15:30~16:30)에만 가능합니다.", "err");
+        return;
+      }
+      const limitInp = document.getElementById("detailLimitPriceInput");
+      const lp = Math.floor(Number(limitInp?.value ?? 0));
+      if (!Number.isFinite(lp) || lp < MIN_STOCK_PRICE) {
+        setMessage("예약가를 올바르게 입력해 주세요.", "err");
+        return;
+      }
+      const q = Math.max(
+        0,
+        Math.floor(
+          computeTradeQtyFromInput(id, action, raw, detailTradeInputMode)
+        )
+      );
+      if (!q) {
+        setMessage("수량·금액을 올바르게 입력해 주세요.", "err");
+        return;
+      }
+      pendingOrders.push({
+        id: `po_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+        symbol: id,
+        side: action,
+        qty: q,
+        limitPrice: lp,
+      });
+      renderPendingOrdersUi();
+      schedulePersistUser();
+      setMessage(`${id} 지정가 예약을 등록했습니다.`, "ok");
+      return;
+    }
+
     const result =
       action === "buy"
         ? await buyStock(id, raw, detailTradeInputMode)
@@ -3556,6 +4000,7 @@ function bindDetailTrade() {
     });
   }
   syncDetailQtyLabel();
+  syncDetailOrderTypeUi();
   syncTradeButtons();
 }
 
@@ -3593,8 +4038,6 @@ function renderAssetSummary() {
     }`;
   }
 
-  const ageEl = document.getElementById("age");
-  if (ageEl) ageEl.textContent = `${game.age}세`;
 }
 
 function renderCalendarUI() {
@@ -3696,6 +4139,7 @@ function onSessionSecondTick() {
     renderAssetSummary();
     syncNextTurnButton();
     syncTradeButtons();
+    processPendingOrdersMatch();
     schedulePersistUser();
     return;
   }
@@ -3709,48 +4153,66 @@ function onSessionSecondTick() {
     return;
   }
 
-  beginCandlePeriodIfNeeded();
-
-  oneMicroPriceStep();
-  stocks.forEach((s) => {
-    const b = candleOhlcBuffer[s.id];
-    if (b) {
-      b.h = Math.max(b.h, s.price);
-      b.l = Math.min(b.l, s.price);
+  if (gameMinutes >= MARKET_OPEN_MIN && gameMinutes < MARKET_REGULAR_CLOSE_MIN) {
+    beginCandlePeriodIfNeeded();
+    oneMicroPriceStep();
+    stocks.forEach((s) => {
+      const b = candleOhlcBuffer[s.id];
+      if (b) {
+        b.h = Math.max(b.h, s.price);
+        b.l = Math.min(b.l, s.price);
+      }
+    });
+    gameMinutes += GAME_MINUTES_PER_REAL_SEC;
+    tickInCandle += 1;
+    renderDateTimeLine();
+    updatePremarketChartOverlay();
+    if (tickInCandle >= TICKS_PER_CANDLE) {
+      sealCurrentCandleAndReset();
     }
-  });
-
-  gameMinutes += GAME_MINUTES_PER_REAL_SEC;
-  tickInCandle += 1;
-  renderDateTimeLine();
-  updatePremarketChartOverlay();
-
-  if (tickInCandle >= TICKS_PER_CANDLE) {
-    sealCurrentCandleAndReset();
+    processPendingOrdersMatch();
+    refreshDetailChart();
+    renderStockListMain();
+    updateDetailPriceLine();
+    renderAssetSummary();
+    stocks.forEach((s) => {
+      prevTickPrice[s.id] = s.price;
+    });
+    schedulePersistUser();
+    syncTradeButtons();
+    if (gameMinutes >= MARKET_CLOSE_MIN) {
+      closeMarket();
+    } else {
+      syncNextTurnButton();
+    }
+    return;
   }
 
-  refreshDetailChart();
-  renderStockListMain();
-  updateDetailPriceLine();
-  renderAssetSummary();
-
-  stocks.forEach((s) => {
-    const o = prevTickPrice[s.id];
-    if (o !== undefined && o !== s.price) {
-      const dir = s.price > o ? "up" : "down";
-      flashPriceNode(`[data-watch-price="${s.id}"]`, dir);
-      flashPriceNode(`[data-portfolio-price="${s.id}"]`, dir);
+  if (isAfterHoursSession()) {
+    if (gameMinutes === MARKET_REGULAR_CLOSE_MIN) {
+      if (tickInCandle > 0) {
+        sealCurrentCandleAndReset();
+      }
+      if (!afterHoursPlanGeneratedToday) {
+        generateAfterHoursNewsPlan();
+        afterHoursPlanGeneratedToday = true;
+      }
     }
-    prevTickPrice[s.id] = s.price;
-  });
-
-  schedulePersistUser();
-  syncTradeButtons();
-
-  if (gameMinutes >= MARKET_CLOSE_MIN) {
-    closeMarket();
-  } else {
-    syncNextTurnButton();
+    releaseAfterHoursNewsForMinute(gameMinutes);
+    gameMinutes += GAME_MINUTES_PER_REAL_SEC;
+    renderDateTimeLine();
+    processPendingOrdersMatch();
+    refreshDetailChart();
+    renderStockListMain();
+    updateDetailPriceLine();
+    renderAssetSummary();
+    schedulePersistUser();
+    syncTradeButtons();
+    if (gameMinutes >= MARKET_CLOSE_MIN) {
+      closeMarket();
+    } else {
+      syncNextTurnButton();
+    }
   }
 }
 
@@ -3801,6 +4263,7 @@ function openNextTradingDay() {
   resetDailyNewsState();
   generatePremarketNewsPlan();
   dividendCandleCounter = 0;
+  afterHoursPlanGeneratedToday = false;
 
   resetNewsSpikeState();
 
@@ -4031,6 +4494,10 @@ function initNewGame() {
   openingGapAppliedToday = true;
   premarketNewsCounts = emptyPremarketNewsCounts();
   premarketNewsScheduleByMin = {};
+  afterHoursNewsCounts = emptyPremarketNewsCounts();
+  afterHoursNewsScheduleByMin = {};
+  afterHoursPlanGeneratedToday = false;
+  pendingOrders = [];
   scheduledEvents = buildInitialCalendar();
   ensureCalendarHorizon();
 
@@ -4059,6 +4526,7 @@ function initNewGame() {
   clearCandleHistory();
 
   warmupPrices();
+  syncEtfPriceFromMarket();
   snapshotSessionOpen();
 }
 

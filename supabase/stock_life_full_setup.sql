@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS public.portfolios (
   avg_cost BIGINT NOT NULL DEFAULT 0 CHECK (avg_cost >= 0),
   PRIMARY KEY (login_name, symbol),
   CONSTRAINT portfolios_symbol_allowed CHECK (
-    symbol IN ('JBD', 'SYW', 'MJS', 'BSL', 'SYG', 'JWF', 'YHL', 'SWB')
+    symbol IN ('JBD', 'SYW', 'MJS', 'BSL', 'SYG', 'JWF', 'YHL', 'SWB', 'GDR', 'MIX')
   )
 );
 
@@ -264,10 +264,13 @@ BEGIN
     RAISE EXCEPTION 'invalid name';
   END IF;
   UPDATE public.users
-    SET cash = initial_capital,
+    SET cash = 1000000,
+        initial_capital = 1000000,
+        profile = '{}'::jsonb,
         hp = 100,
         stress = 0,
         trade_blocked_until_ms = 0,
+        sim_age = 25,
         updated_at = NOW()
     WHERE login_name = nm;
   DELETE FROM public.portfolios WHERE login_name = nm;
