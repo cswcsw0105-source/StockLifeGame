@@ -243,9 +243,18 @@ function oneMicroPriceStep(st: MarketState): void {
         delta = -(20 + Math.floor(Math.random() * 21));
       }
     } else if (id === "GDR") {
-      delta = -1 + Math.floor(Math.random() * 3);
+      const w = Math.max(2, Math.min(18, Math.floor(3 + s.price * 0.0009)));
+      delta = Math.floor((Math.random() + Math.random() - 1) * w);
     } else {
-      delta = -2 + Math.floor(Math.random() * 5);
+      const base = Math.max(
+        8,
+        Math.min(150, Math.floor(7 + s.price * 0.0052)),
+      );
+      delta = Math.floor((Math.random() + Math.random() - 1) * base);
+      if (Math.random() < 0.08) {
+        const kick = Math.floor(Math.random() * Math.min(45, base + 12));
+        delta += (Math.random() < 0.5 ? -1 : 1) * kick;
+      }
     }
     s.price = clampStockPrice(s.price + delta);
   });

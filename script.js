@@ -116,6 +116,19 @@ const AFTER_HOURS_NEWS_START_MIN = MARKET_REGULAR_CLOSE_MIN;
 const AFTER_HOURS_NEWS_END_MIN = MARKET_CLOSE_MIN;
 /** Net Impact 1당 전일 종가 대비 시초가 변동률(±) — 누적 뉴스로 갭 강화 */
 const GAP_PCT_PER_NET_IMPACT = 0.14;
+/** 09:00 시초가 갭 중 즉시 반영 비율(나머지는 개장 직후 수 분에 걸쳐 급격히 추적) */
+const OPEN_GAP_IMMEDIATE_FRAC_MIN = 0.28;
+const OPEN_GAP_IMMEDIATE_FRAC_MAX = 0.42;
+/** 개장 직후 갭 잔여분을 나눠 먹는 게임 분(틱) 수 범위 */
+const OPEN_GAP_SPREAD_STEPS_MIN = 5;
+const OPEN_GAP_SPREAD_STEPS_MAX = 10;
+
+/** 갭 잔여 추적 진행 곡선(낮을수록 초반에 더 가파르게) */
+function easedOpenGapFrac(immediateFrac, stepIndex, spreadSteps) {
+  if (spreadSteps <= 0) return 1;
+  const t = Math.min(1, Math.max(0, stepIndex / spreadSteps));
+  return immediateFrac + (1 - immediateFrac) * Math.pow(t, 0.44);
+}
 /** 09:00~15:30 정규장 = 390게임분, 10분봉 39개 */
 const SESSION_GAME_MINUTES = MARKET_REGULAR_CLOSE_MIN - MARKET_OPEN_MIN;
 const CANDLES_PER_SESSION = SESSION_GAME_MINUTES / CANDLE_GAME_MINUTES;
@@ -417,6 +430,8 @@ let afterHoursNewsScheduleByMin = {};
 let afterHoursPlanGeneratedToday = false;
 /** 09:00 시초가 갭 반영 여부(하루 1회) */
 let openingGapAppliedToday = false;
+/** 개장 직후 목표 시초가까지 분산 추적(한 틱에 한 단계) */
+let openingGapBlendByStock = {};
 
 /** 종목별 오늘 뉴스(체이닝) 건수 — 최대 6 */
 let newsCountByStock = emptyChainState();
@@ -450,9 +465,12 @@ let newsSpikeDirection = Object.fromEntries(
 let newsSpikeMode = Object.fromEntries(
   STOCK_SPECS.map((s) => [s.id, "normal"])
 );
+/** extremeBull/Bear 구간에서 틱마다 접근할 목표 가격(다 틱에 도달) */
+let newsSpikeExtremeTarget = {};
 
 function resetNewsSpikeState() {
   newsSpikeTicksLeft = emptyChainState();
+  newsSpikeExtremeTarget = {};
   STOCK_SPECS.forEach((s) => {
     newsSpikeDirection[s.id] = 1;
     newsSpikeMode[s.id] = "normal";
@@ -474,9 +492,25 @@ function scheduleNewsSpikeForStock(stockId, directionSign) {
 /** 극호재(5~10배)·극악재(~1/10) — ETF 제외, 희귀 이벤트 */
 function rollExtremeNewsKnock(stockId, positive) {
   if (!getStockById(stockId) || isEtfId(stockId)) return;
-  newsSpikeTicksLeft[stockId] = Math.max(newsSpikeTicksLeft[stockId] || 0, 1);
+  const s = getStockById(stockId);
+  const p = Number(s.price);
+  if (!Number.isFinite(p) || p < MIN_STOCK_PRICE) return;
+  const spreadTicks = 3 + Math.floor(Math.random() * 3);
+  newsSpikeTicksLeft[stockId] = Math.max(
+    newsSpikeTicksLeft[stockId] || 0,
+    spreadTicks
+  );
   newsSpikeDirection[stockId] = positive ? 1 : -1;
   newsSpikeMode[stockId] = positive ? "extremeBull" : "extremeBear";
+  if (positive) {
+    newsSpikeExtremeTarget[stockId] = clampStockPrice(
+      Math.floor(p * (5 + Math.random() * 5))
+    );
+  } else {
+    newsSpikeExtremeTarget[stockId] = clampStockPrice(
+      Math.max(MIN_STOCK_PRICE, Math.floor(p * (0.05 + Math.random() * 0.05)))
+    );
+  }
 }
 
 function scheduleNewsSpikeFromImpacts(impacts) {
@@ -1105,6 +1139,38 @@ function applyServerMarketState(m) {
       : gm0 < MARKET_OPEN_MIN
         ? false
         : true;
+  openingGapBlendByStock = {};
+  if (m.openingGapBlendByStock && typeof m.openingGapBlendByStock === "object") {
+    STOCK_SPECS.forEach((spec) => {
+      if (spec.kind === "etf") return;
+      const b = m.openingGapBlendByStock[spec.id];
+      if (!b || typeof b !== "object") return;
+      const anchor = Number(b.anchor);
+      const target = Number(b.target);
+      const nextIdx = Number(b.nextIdx);
+      const totalSpread = Number(b.totalSpread);
+      const imm = Number(b.immediateFrac);
+      if (
+        Number.isFinite(anchor) &&
+        Number.isFinite(target) &&
+        Number.isFinite(nextIdx) &&
+        Number.isFinite(totalSpread) &&
+        Number.isFinite(imm) &&
+        totalSpread >= 1
+      ) {
+        openingGapBlendByStock[spec.id] = {
+          anchor: clampStockPrice(Math.round(anchor)),
+          target: clampStockPrice(Math.round(target)),
+          nextIdx: Math.max(1, Math.floor(nextIdx)),
+          totalSpread: Math.min(
+            OPEN_GAP_SPREAD_STEPS_MAX,
+            Math.max(OPEN_GAP_SPREAD_STEPS_MIN, Math.floor(totalSpread))
+          ),
+          immediateFrac: Math.min(0.55, Math.max(0.15, imm)),
+        };
+      }
+    });
+  }
   headlineImpulse = m.headlineImpulse ?? 0;
   nextCalendarEventId = m.nextCalendarEventId ?? 1;
   scheduledEvents = Array.isArray(m.scheduledEvents) ? m.scheduledEvents : [];
@@ -1128,6 +1194,15 @@ function applyServerMarketState(m) {
       const v = m.newsSpikeMode[spec.id];
       newsSpikeMode[spec.id] =
         v === "extremeBull" || v === "extremeBear" ? v : "normal";
+    });
+  }
+  newsSpikeExtremeTarget = {};
+  if (m.newsSpikeExtremeTarget && typeof m.newsSpikeExtremeTarget === "object") {
+    STOCK_SPECS.forEach((spec) => {
+      const v = Number(m.newsSpikeExtremeTarget[spec.id]);
+      if (Number.isFinite(v) && v >= MIN_STOCK_PRICE) {
+        newsSpikeExtremeTarget[spec.id] = clampStockPrice(Math.round(v));
+      }
     });
   }
   afterHoursNewsCounts = emptyPremarketNewsCounts();
@@ -1365,6 +1440,7 @@ function serializeMarketState() {
     premarketNewsCounts: JSON.parse(JSON.stringify(premarketNewsCounts)),
     premarketNewsScheduleByMin: { ...premarketNewsScheduleByMin },
     openingGapAppliedToday,
+    openingGapBlendByStock: JSON.parse(JSON.stringify(openingGapBlendByStock)),
     headlineImpulse,
     nextCalendarEventId,
     scheduledEvents: JSON.parse(JSON.stringify(scheduledEvents)),
@@ -1373,6 +1449,7 @@ function serializeMarketState() {
     newsSpikeTicksLeft: { ...newsSpikeTicksLeft },
     newsSpikeDirection: { ...newsSpikeDirection },
     newsSpikeMode: { ...newsSpikeMode },
+    newsSpikeExtremeTarget: { ...newsSpikeExtremeTarget },
     afterHoursNewsCounts: JSON.parse(JSON.stringify(afterHoursNewsCounts)),
     afterHoursNewsScheduleByMin: { ...afterHoursNewsScheduleByMin },
     afterHoursPlanGeneratedToday,
@@ -2297,6 +2374,7 @@ function generatePremarketNewsPlan() {
   premarketNewsCounts = emptyPremarketNewsCounts();
   premarketNewsScheduleByMin = {};
   openingGapAppliedToday = false;
+  openingGapBlendByStock = {};
 
   const events = [];
   STOCK_SPECS.forEach((spec) => {
@@ -2463,7 +2541,32 @@ function applyOpeningGapFromPremarket() {
     const s = getStockById(spec.id);
     if (!s) return;
     const mult = 1 + net * GAP_PCT_PER_NET_IMPACT;
-    s.price = clampStockPrice(Math.floor(s.price * mult));
+    const anchor = clampStockPrice(s.price);
+    const target = clampStockPrice(Math.floor(anchor * mult));
+    const immediateFrac =
+      OPEN_GAP_IMMEDIATE_FRAC_MIN +
+      Math.random() *
+        (OPEN_GAP_IMMEDIATE_FRAC_MAX - OPEN_GAP_IMMEDIATE_FRAC_MIN);
+    const spreadSteps =
+      OPEN_GAP_SPREAD_STEPS_MIN +
+      Math.floor(
+        Math.random() *
+          (OPEN_GAP_SPREAD_STEPS_MAX - OPEN_GAP_SPREAD_STEPS_MIN + 1)
+      );
+    if (target !== anchor) {
+      s.price = clampStockPrice(
+        Math.round(anchor + (target - anchor) * immediateFrac)
+      );
+      openingGapBlendByStock[spec.id] = {
+        anchor,
+        target,
+        nextIdx: 1,
+        totalSpread: spreadSteps,
+        immediateFrac,
+      };
+    } else {
+      s.price = anchor;
+    }
     summaryBits.push(`${spec.id} ${net > 0 ? "+" : ""}${net}`);
   });
   syncEtfPriceFromMarket();
@@ -2896,30 +2999,68 @@ function syncEtfPriceFromMarket() {
 }
 
 /**
- * 평상시: 틱당 -2~+2원 횡보. 진짜 뉴스(스파이크) 구간: 틱당 대폭 상승·하락(원 단위).
- * REIT: 초저변동. ETF: 별도 동기화.
+ * 평상시: 틱당 가격대 비례 무작위 횡보. 뉴스 스파이크: 틱당 대폭 변동.
+ * REIT: 정규장 대비 낮은 변동. ETF: 별도 동기화.
  */
 function oneMicroPriceStep() {
   stocks.forEach((s) => {
     const id = s.id;
     if (isEtfId(id)) return;
+
+    const gapBlend = openingGapBlendByStock[id];
+    if (gapBlend && typeof gapBlend === "object") {
+      const {
+        anchor,
+        target,
+        nextIdx,
+        totalSpread,
+        immediateFrac,
+      } = gapBlend;
+      const ni = Math.floor(Number(nextIdx)) || 1;
+      const ts = Math.max(1, Math.floor(Number(totalSpread)) || 1);
+      const imm = Number(immediateFrac);
+      if (
+        Number.isFinite(anchor) &&
+        Number.isFinite(target) &&
+        Number.isFinite(imm) &&
+        ni <= ts
+      ) {
+        const frac = easedOpenGapFrac(imm, ni, ts);
+        s.price = clampStockPrice(Math.round(anchor + (target - anchor) * frac));
+        if (ni >= ts) {
+          delete openingGapBlendByStock[id];
+        } else {
+          gapBlend.nextIdx = ni + 1;
+        }
+        return;
+      }
+      delete openingGapBlendByStock[id];
+    }
+
     const spikeLeft = newsSpikeTicksLeft[id] ?? 0;
     const mode = newsSpikeMode[id] || "normal";
     if (spikeLeft > 0) {
       newsSpikeTicksLeft[id] = spikeLeft - 1;
-      if (mode === "extremeBull") {
-        const mult = 5 + Math.random() * 5;
-        s.price = clampStockPrice(Math.floor(s.price * mult));
+      if (mode === "extremeBull" || mode === "extremeBear") {
+        const tgt = newsSpikeExtremeTarget[id];
+        if (tgt != null && Number.isFinite(tgt)) {
+          const leftAfter = newsSpikeTicksLeft[id];
+          if (leftAfter <= 0) {
+            s.price = clampStockPrice(Math.round(tgt));
+          } else {
+            const alpha = 0.36 + Math.random() * 0.26;
+            s.price = clampStockPrice(
+              Math.round(s.price + (tgt - s.price) * alpha)
+            );
+          }
+          if (leftAfter <= 0) {
+            newsSpikeMode[id] = "normal";
+            delete newsSpikeExtremeTarget[id];
+          }
+          return;
+        }
         newsSpikeMode[id] = "normal";
-        return;
-      }
-      if (mode === "extremeBear") {
-        const f = 0.05 + Math.random() * 0.05;
-        s.price = clampStockPrice(
-          Math.max(MIN_STOCK_PRICE, Math.floor(s.price * f))
-        );
-        newsSpikeMode[id] = "normal";
-        return;
+        delete newsSpikeExtremeTarget[id];
       }
       const up = (newsSpikeDirection[id] ?? 1) >= 0;
       let delta;
@@ -2933,9 +3074,18 @@ function oneMicroPriceStep() {
     }
     let delta;
     if (isReitId(id)) {
-      delta = -1 + Math.floor(Math.random() * 3);
+      const w = Math.max(2, Math.min(18, Math.floor(3 + s.price * 0.0009)));
+      delta = Math.floor((Math.random() + Math.random() - 1) * w);
     } else {
-      delta = -2 + Math.floor(Math.random() * 5);
+      const base = Math.max(
+        8,
+        Math.min(150, Math.floor(7 + s.price * 0.0052))
+      );
+      delta = Math.floor((Math.random() + Math.random() - 1) * base);
+      if (Math.random() < 0.08) {
+        const kick = Math.floor(Math.random() * Math.min(45, base + 12));
+        delta += (Math.random() < 0.5 ? -1 : 1) * kick;
+      }
     }
     s.price = clampStockPrice(s.price + delta);
   });
@@ -3230,6 +3380,11 @@ function initDetailCharts(stockId) {
         data: buildCandleSeriesData(stockId),
       },
     ],
+    stroke: {
+      width: [1.15],
+      lineCap: "round",
+      lineJoin: "round",
+    },
     plotOptions: {
       candlestick: {
         colors: {
@@ -4641,6 +4796,7 @@ function initNewGame() {
   awaitingDayRoll = false;
   isMarketClosed = false;
   openingGapAppliedToday = true;
+  openingGapBlendByStock = {};
   premarketNewsCounts = emptyPremarketNewsCounts();
   premarketNewsScheduleByMin = {};
   afterHoursNewsCounts = emptyPremarketNewsCounts();
