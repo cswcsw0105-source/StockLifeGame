@@ -790,11 +790,8 @@ function renderLifeTab() {
   const salaryEl = document.getElementById("lifeSalaryInfo");
   const lockEl = document.getElementById("lifeTradeLockHint");
   const btn = document.getElementById("btnEmergencyHanRiver");
-  const ctx = getMonthContextForDayIndex(gameDayIndex);
   if (salaryEl) {
-    salaryEl.textContent = `매월 1일 자동 입금 ${formatWon(
-      MONTHLY_SALARY
-    )} · 이번 달 키: ${ctx.monthKey}`;
+    salaryEl.textContent = `매월 1일 자동 입금 ${formatWon(MONTHLY_SALARY)}`;
   }
   const blocked = isTradeBlockedByPenalty();
   if (lockEl) {
@@ -4641,13 +4638,13 @@ function renderStocks() {
     const plCls = pl > 0 ? "chg-up" : pl < 0 ? "chg-down" : "chg-flat";
 
     tr.innerHTML = `
-      <td>
+      <td class="td-portfolio-name">
         <span class="stock-name">${escapeHtml(s.name)}</span>
         <span class="stock-ticker">${escapeHtml(s.id)}</span>
       </td>
       <td class="td-portfolio-price"><span data-portfolio-price="${escapeHtml(s.id)}" class="watch-price portfolio-price-cell">${formatStockWon(s.price)}</span></td>
-      <td>${owned > 0 ? formatStockWon(avg) : "—"}</td>
-      <td>${owned > 0 ? formatShares(owned) : "—"}</td>
+      <td class="td-portfolio-avg">${owned > 0 ? formatStockWon(avg) : "—"}</td>
+      <td class="td-portfolio-held">${owned > 0 ? formatShares(owned) : "—"}</td>
       <td class="${plCls} portfolio-pl-cell" data-portfolio-pl="${escapeHtml(s.id)}">${owned > 0 ? `${pl >= 0 ? "+" : ""}${formatWon(pl)}` : "—"}</td>
       <td class="cell-qty-portfolio">
         <input type="number" class="qty-input portfolio-qty-input" min="0" step="1" value="1" data-stock="${escapeHtml(s.id)}" aria-label="${escapeHtml(s.name)} 수량" inputmode="numeric" />

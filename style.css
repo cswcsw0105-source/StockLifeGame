@@ -1491,6 +1491,199 @@ body {
   opacity: 0.88;
 }
 
+/* 내 투자 탭 — 좁은 화면: 테이블 행을 카드형 스택 */
+@media (max-width: 768px) {
+  .portfolio-table-wrap {
+    overflow-x: visible;
+    border-radius: 14px;
+  }
+
+  .portfolio-table-wrap .stock-table {
+    display: block;
+    width: 100%;
+  }
+
+  .portfolio-table-wrap .stock-table thead {
+    display: none;
+  }
+
+  .portfolio-table-wrap .stock-table tbody {
+    display: block;
+  }
+
+  .portfolio-table-wrap .stock-table tbody tr {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    column-gap: 10px;
+    row-gap: 10px;
+    align-items: start;
+    padding: 16px 14px;
+    margin: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    background: transparent;
+  }
+
+  .portfolio-table-wrap .stock-table tbody tr:last-child {
+    border-bottom: none;
+  }
+
+  .portfolio-table-wrap .stock-table tbody td {
+    display: block;
+    padding: 0;
+    border: none;
+    white-space: normal;
+    vertical-align: top;
+  }
+
+  .portfolio-table-wrap .td-portfolio-name {
+    grid-column: 1 / span 2;
+    grid-row: 1;
+    padding-right: 6px;
+  }
+
+  .portfolio-table-wrap .td-portfolio-name .stock-name {
+    font-size: 0.95rem;
+    line-height: 1.35;
+  }
+
+  .portfolio-table-wrap .td-portfolio-name .stock-ticker {
+    margin-top: 2px;
+    font-size: 0.62rem;
+  }
+
+  .portfolio-table-wrap td.portfolio-pl-cell {
+    grid-column: 3;
+    grid-row: 1;
+    justify-self: end;
+    align-self: start;
+    text-align: right;
+    font-size: 1.12rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    line-height: 1.25;
+    max-width: 11rem;
+    word-break: break-all;
+  }
+
+  .portfolio-table-wrap td.portfolio-pl-cell.chg-up {
+    color: #ff3358;
+  }
+
+  .portfolio-table-wrap td.portfolio-pl-cell.chg-down {
+    color: #3d8cff;
+  }
+
+  .portfolio-table-wrap .td-portfolio-price,
+  .portfolio-table-wrap .td-portfolio-avg,
+  .portfolio-table-wrap .td-portfolio-held {
+    font-size: 0.72rem;
+    color: rgba(180, 190, 210, 0.82);
+    font-weight: 500;
+    line-height: 1.35;
+  }
+
+  .portfolio-table-wrap .td-portfolio-price {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .portfolio-table-wrap .td-portfolio-avg {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  .portfolio-table-wrap .td-portfolio-held {
+    grid-column: 3;
+    grid-row: 2;
+    text-align: right;
+  }
+
+  .portfolio-table-wrap .td-portfolio-price::before,
+  .portfolio-table-wrap .td-portfolio-avg::before,
+  .portfolio-table-wrap .td-portfolio-held::before {
+    display: block;
+    font-size: 0.58rem;
+    font-weight: 600;
+    color: rgba(139, 149, 168, 0.95);
+    letter-spacing: 0.02em;
+    margin-bottom: 3px;
+  }
+
+  .portfolio-table-wrap .td-portfolio-price::before {
+    content: "현재가";
+  }
+
+  .portfolio-table-wrap .td-portfolio-avg::before {
+    content: "평단가";
+  }
+
+  .portfolio-table-wrap .td-portfolio-held::before {
+    content: "보유";
+  }
+
+  .portfolio-table-wrap .td-portfolio-price .portfolio-price-cell {
+    font-size: inherit;
+    font-weight: 600;
+    color: rgba(230, 235, 245, 0.96);
+  }
+
+  .portfolio-table-wrap .cell-qty-portfolio {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
+    gap: 10px;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .portfolio-table-wrap .cell-qty-portfolio .portfolio-qty-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: none;
+    width: auto;
+    min-height: 48px;
+  }
+
+  .portfolio-table-wrap .cell-qty-portfolio .portfolio-qty-quick {
+    margin-top: 0;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: stretch;
+  }
+
+  .portfolio-table-wrap .cell-qty-portfolio .btn-portfolio-smart {
+    min-width: 4.5rem;
+    width: auto;
+    max-width: none;
+    min-height: 48px;
+    padding: 10px 14px;
+  }
+
+  .portfolio-table-wrap .cell-actions-portfolio {
+    grid-column: 1 / -1;
+    grid-row: 4;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 10px;
+    align-items: stretch;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .portfolio-table-wrap .cell-actions-portfolio .btn-portfolio-trade {
+    flex: 1 1 0;
+    width: auto;
+    max-width: none;
+    min-width: 0;
+    min-height: 48px;
+    padding: 12px 10px;
+    font-size: 0.85rem;
+  }
+}
+
 .detail-trade-panel .trade-fee-hint {
   margin: 4px 0 10px;
 }
