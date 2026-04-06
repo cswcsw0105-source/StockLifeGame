@@ -1,21 +1,21 @@
--- Stock Life: 전역 자산 초기화(1천만원), 소셜 매매 알림 테이블, 매매 RPC에 풀매수/풀매도 이벤트 삽입
+-- Stock Life: 전역 자산 초기화(100만원), 소셜 매매 알림 테이블, 매매 RPC에 풀매수/풀매도 이벤트 삽입
 -- 적용 후 Supabase Dashboard → SQL 또는 supabase db push
 
 -- (선택) 과거 실험 테이블 정리
 DROP TABLE IF EXISTS public.trade_logs CASCADE;
 DROP TABLE IF EXISTS public.assets CASCADE;
 
--- 기본 자산 1천만원
+-- 기본 자산 100만원
 ALTER TABLE public.users
-  ALTER COLUMN cash SET DEFAULT 10000000;
+  ALTER COLUMN cash SET DEFAULT 1000000;
 ALTER TABLE public.users
-  ALTER COLUMN initial_capital SET DEFAULT 10000000;
+  ALTER COLUMN initial_capital SET DEFAULT 1000000;
 
 -- 기존 유저 전원 리셋 + 보유 삭제
 DELETE FROM public.portfolios;
 UPDATE public.users SET
-  cash = 10000000,
-  initial_capital = 10000000,
+  cash = 1000000,
+  initial_capital = 1000000,
   profile = '{}'::jsonb,
   sim_age = 25,
   hp = 100,
@@ -235,8 +235,8 @@ BEGIN
   END IF;
   DELETE FROM public.portfolios;
   UPDATE public.users SET
-    cash = 10000000,
-    initial_capital = 10000000,
+    cash = 1000000,
+    initial_capital = 1000000,
     profile = '{}'::jsonb,
     sim_age = 25,
     hp = 100,

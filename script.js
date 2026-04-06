@@ -27,9 +27,9 @@ function rollIsRumor() {
   return Math.random() < RUMOR_FRACTION;
 }
 const NEXT_TRADING_DAY_DELAY_MS = 2200;
-const INITIAL_CAPITAL = 10_000_000;
+const INITIAL_CAPITAL = 1_000_000;
 /** 게임 캘린더 매월 1일 자동 입금 */
-const MONTHLY_SALARY = 3_000_000;
+const MONTHLY_SALARY = 1_000_000;
 /** 이 금액 미만이면 급전 알바 버튼 활성(게임 규칙) */
 const EMERGENCY_JOB_CASH_THRESHOLD = 1_000_000;
 /** 한강 급전 알바 매매 잠금(밀리초) — DB `emergency_han_river_job` 과 동일 */
@@ -776,6 +776,10 @@ async function loadUserFromServer() {
   playerProfile.setupComplete = !!prof.setupComplete;
   playerProfile.lastSalaryMonthKey =
     typeof prof.lastSalaryMonthKey === "string" ? prof.lastSalaryMonthKey : "";
+  if (!playerProfile.lastSalaryMonthKey) {
+    playerProfile.lastSalaryMonthKey =
+      getMonthContextForDayIndex(gameDayIndex).monthKey;
+  }
   watchlistIds = Array.isArray(prof.watchlist)
     ? prof.watchlist.filter((id) => STOCK_SPECS.some((s) => s.id === id))
     : [];
@@ -837,19 +841,17 @@ function renderNewsFeedFromServer(items) {
   if (!list || !Array.isArray(items)) return;
   clearNewsFeedRevealTimers();
   list.innerHTML = "";
-  const arr = items.filter(matchesMainNewsFilter).slice(0, MAX_NEWS_ITEMS);
+  const arr = items
+    .filter(matchesMainNewsFilter)
+    .sort((a, b) => newsItemSortKey(b) - newsItemSortKey(a))
+    .slice(0, MAX_NEWS_ITEMS);
   arr.forEach((it) => {
     const li = document.createElement("li");
     li.className = `news-item news-${it.type || "news"}`;
     if (it.stockId) li.dataset.stockId = it.stockId;
     const timeEl = document.createElement("span");
     timeEl.className = "news-time";
-    const d = new Date(it.ts || Date.now());
-    timeEl.textContent = d.toLocaleTimeString("ko-KR", {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
+    timeEl.textContent = newsItemDisplayTime(it);
     const body = document.createElement("span");
     body.className = "news-item-body";
     const tagWrap = document.createElement("span");
@@ -973,6 +975,14 @@ function applyServerMarketState(m) {
           global: it.global === true,
           subline: it.subline,
           is_rumor: it.is_rumor === true,
+          gameDayIndex:
+            typeof it.gameDayIndex === "number" ? it.gameDayIndex : undefined,
+          gameMinutes:
+            typeof it.gameMinutes === "number" ? it.gameMinutes : undefined,
+          gameTimeOrdinal:
+            typeof it.gameTimeOrdinal === "number"
+              ? it.gameTimeOrdinal
+              : undefined,
         }))
         .slice(0, MAX_NEWS_ITEMS)
     : [];
@@ -983,8 +993,16 @@ function applyServerMarketState(m) {
   syncNextTurnButton();
 }
 
+/** 온보딩(캐릭터 미완료)·튜토리얼·로그인 전: 시장 관련 토스트 숨김 */
+function shouldSuppressMarketToast() {
+  if (!loginDisplayName) return true;
+  if (!playerProfile.setupComplete) return true;
+  return tutorialGateActive;
+}
+
 /** DB에 행이 없거나 state가 비어 있을 때: 현재 클라이언트 시장 스냅샷(동전주 초기화 직후 initNewGame 기준)을 upsert */
-async function seedMarketStateFromCurrentClient() {
+async function seedMarketStateFromCurrentClient(options = {}) {
+  const silent = options.silent === true;
   if (!sb) return false;
   const stateObj = serializeMarketState();
   const { error } = await sb.from(TBL_MARKET_STATE).upsert(
@@ -993,14 +1011,18 @@ async function seedMarketStateFromCurrentClient() {
   );
   if (error) {
     console.warn("seedMarketStateFromCurrentClient", error);
-    setMessage(
-      "시장 초기 저장에 실패했습니다. Supabase에서 market_state에 대한 INSERT 권한(RLS)을 확인하세요.",
-      "err"
-    );
+    if (!silent && !shouldSuppressMarketToast()) {
+      setMessage(
+        "시장 초기 저장에 실패했습니다. Supabase에서 market_state에 대한 INSERT 권한(RLS)을 확인하세요.",
+        "err"
+      );
+    }
     return false;
   }
   applyServerMarketState(stateObj);
-  setMessage("시장 데이터가 없어 동전주(100~200원) 초기 세팅을 저장했습니다.", "ok");
+  if (!silent && !shouldSuppressMarketToast()) {
+    setMessage("시장 데이터가 없어 동전주(100~200원) 초기 세팅을 저장했습니다.", "ok");
+  }
   return true;
 }
 
@@ -1014,7 +1036,12 @@ function shouldSeedMarketState(serverState) {
   return false;
 }
 
-async function fetchMarketOnce() {
+/**
+ * users 행이 있고 캐릭터 설정 완료 후에 호출하는 것이 안전(RLS·시드).
+ * options.silent: true면 성공/실패 토스트 없음(온보딩·튜토리얼 중).
+ */
+async function fetchMarketOnce(options = {}) {
+  const silent = options.silent === true || shouldSuppressMarketToast();
   if (!sb) return;
   const { data, error } = await sb
     .from(TBL_MARKET_STATE)
@@ -1023,15 +1050,24 @@ async function fetchMarketOnce() {
     .maybeSingle();
   if (error) {
     console.warn("fetchMarketOnce", error);
-    setMessage("시장 데이터를 불러오지 못했습니다. Edge Function·DB를 확인하세요.", "err");
+    if (!silent) {
+      setMessage("시장 데이터를 불러오지 못했습니다. Edge Function·DB를 확인하세요.", "err");
+    }
     return;
   }
   const raw = data?.state;
   if (!data || shouldSeedMarketState(raw)) {
-    await seedMarketStateFromCurrentClient();
+    await seedMarketStateFromCurrentClient({ silent });
     return;
   }
   applyServerMarketState(raw);
+}
+
+/** 로그인·캐릭터 생성 완료 후에만 시장 fetch/시드 (빈 DB 깡통 접속 시 온보딩 중 에러 방지) */
+async function tryFetchSeedMarketOnce(options = {}) {
+  if (!sb || !onlineMode) return;
+  if (!loginDisplayName || !playerProfile.setupComplete) return;
+  await fetchMarketOnce(options);
 }
 
 function clearMarketClientTick() {
@@ -1081,6 +1117,9 @@ function serializeMarketState() {
       global: it.global === true,
       subline: it.subline,
       is_rumor: it.is_rumor === true,
+      gameDayIndex: it.gameDayIndex,
+      gameMinutes: it.gameMinutes,
+      gameTimeOrdinal: it.gameTimeOrdinal,
     })),
   };
 }
@@ -1263,7 +1302,9 @@ async function maybeAdvanceOnlineMarketAsLeader() {
 function ensureOnlineMarketSync(reason = "") {
   if (!onlineMode || !sb) return;
   try {
-    fetchMarketOnce().catch((e) => console.warn("fetchMarketOnce", reason, e));
+    fetchMarketOnce({ silent: shouldSuppressMarketToast() }).catch((e) =>
+      console.warn("fetchMarketOnce", reason, e)
+    );
     subscribeMarketRealtime();
     subscribeSocialTradeRealtime();
     clearMarketClientTick();
@@ -1318,7 +1359,9 @@ function subscribeMarketRealtime() {
     )
     .subscribe((status) => {
       if (status === "SUBSCRIBED") {
-        fetchMarketOnce().catch((e) => console.warn("fetch after subscribe", e));
+        fetchMarketOnce({ silent: shouldSuppressMarketToast() }).catch((e) =>
+          console.warn("fetch after subscribe", e)
+        );
       } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
         console.warn("market_state channel", status);
       }
@@ -1886,6 +1929,39 @@ function formatDateTimeBracket() {
   const { month, day } = getCalendarParts(gameDayIndex);
   const t = formatMinuteOfDay(gameMinutes);
   return `[${yc}년차 ${month}월 ${day}일 ${t}]`;
+}
+
+/** 뉴스·속보 타임스탬프 — 현실 시계가 아닌 게임 내 시각 */
+function formatGameNewsTimeLabel(dayIdx, minutes) {
+  const yc = getYearChar(dayIdx);
+  const { month, day } = getCalendarParts(dayIdx);
+  const t = formatMinuteOfDay(minutes);
+  return `[${yc}년차 ${month}월 ${day}일 ${t}]`;
+}
+
+function newsItemDisplayTime(it) {
+  if (
+    typeof it.gameDayIndex === "number" &&
+    Number.isFinite(it.gameDayIndex) &&
+    typeof it.gameMinutes === "number" &&
+    Number.isFinite(it.gameMinutes)
+  ) {
+    return formatGameNewsTimeLabel(it.gameDayIndex, it.gameMinutes);
+  }
+  return "—";
+}
+
+function newsItemSortKey(it) {
+  if (typeof it.gameTimeOrdinal === "number" && Number.isFinite(it.gameTimeOrdinal)) {
+    return it.gameTimeOrdinal;
+  }
+  if (
+    typeof it.gameDayIndex === "number" &&
+    typeof it.gameMinutes === "number"
+  ) {
+    return gameTimeOrdinalFromParts(it.gameDayIndex, it.gameMinutes);
+  }
+  return 0;
 }
 
 /** 정규 매매 구간 09:00~15:30 (게임 분 기준) */
@@ -2805,7 +2881,7 @@ function renderDetailStockNewsSection() {
       if (nameOk && it.text && String(it.text).includes(nameOk)) return true;
       return false;
     })
-    .sort((a, b) => new Date(b.ts || 0) - new Date(a.ts || 0));
+    .sort((a, b) => newsItemSortKey(b) - newsItemSortKey(a));
   ul.innerHTML = "";
   if (items.length === 0) {
     const li = document.createElement("li");
@@ -2817,15 +2893,9 @@ function renderDetailStockNewsSection() {
   items.slice(0, 40).forEach((it) => {
     const li = document.createElement("li");
     li.className = "detail-news-item";
-    const d = new Date(it.ts || Date.now());
     const timeEl = document.createElement("time");
     timeEl.className = "detail-news-time";
-    timeEl.textContent = d.toLocaleString("ko-KR", {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    timeEl.textContent = newsItemDisplayTime(it);
     const row = document.createElement("div");
     row.className = "detail-news-text-row";
     const tagWrap = document.createElement("span");
@@ -2933,8 +3003,13 @@ function triggerNewsShake() {
 }
 
 function addNewsItem(text, type = "news", subline = "", meta = {}) {
+  const gDay = gameDayIndex;
+  const gMin = gameMinutes;
   const item = {
     ts: new Date().toISOString(),
+    gameDayIndex: gDay,
+    gameMinutes: gMin,
+    gameTimeOrdinal: gameTimeOrdinalFromParts(gDay, gMin),
     text,
     type: type || "news",
     subline: subline || "",
@@ -3095,7 +3170,7 @@ function bindCharacterSetup() {
   const btn = document.getElementById("btnCharacterSetupOk");
   if (!btn || btn.dataset.bound === "1") return;
   btn.dataset.bound = "1";
-  btn.addEventListener("click", () => {
+  btn.addEventListener("click", async () => {
     const nameRaw = document.getElementById("setupPlayerName")?.value ?? "";
     const name = nameRaw.trim();
     const ageNum = parseInt(
@@ -3115,7 +3190,14 @@ function bindCharacterSetup() {
     playerProfile.birthday = birth;
     playerProfile.setupComplete = true;
     renderProfileDisplay();
-    schedulePersistUser();
+    if (onlineMode && sb && loginDisplayName) {
+      await persistUserNow().catch((e) =>
+        console.warn("persistUserNow after setup", e)
+      );
+    }
+    void tryFetchSeedMarketOnce({ silent: true }).catch((e) =>
+      console.warn("tryFetchSeedMarketOnce after setup", e)
+    );
     if (!isTutorialDone()) {
       showScreen("screen-tutorial");
       requestAnimationFrame(() => document.getElementById("btnTutorialDismiss")?.focus());
@@ -3958,7 +4040,8 @@ function initNewGame() {
   game.costBasis = {};
   game.initialCapital = INITIAL_CAPITAL;
   game.tradeBlockedUntilMs = 0;
-  playerProfile.lastSalaryMonthKey = "";
+  playerProfile.lastSalaryMonthKey =
+    getMonthContextForDayIndex(gameDayIndex).monthKey;
 
   stocks.forEach((s) => {
     s.price = randomInitialPrice();
@@ -3992,10 +4075,9 @@ async function runGameBootstrap() {
     /* ignore */
   }
   initNewGame();
-  await fetchMarketOnce();
+  await loadUserFromServer();
   subscribeMarketRealtime();
   subscribeSocialTradeRealtime();
-  await loadUserFromServer();
 
   renderDateTimeLine();
   renderCalendarUI();
@@ -4035,6 +4117,7 @@ async function runGameBootstrap() {
   });
 
   routeOnboardingScreens();
+  await tryFetchSeedMarketOnce({ silent: tutorialGateActive });
 }
 
 async function init() {
