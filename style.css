@@ -1479,10 +1479,6 @@ body {
   font-size: 0.72rem;
 }
 
-.portfolio-actions {
-  margin-top: 16px;
-}
-
 .trade-fee-hint {
   font-size: 0.65rem;
   color: var(--text-dim);
@@ -2396,5 +2392,157 @@ body {
 
   .tab-bar {
     max-width: 720px;
+  }
+}
+
+/* 개미지옥 — 실시간 피드 · 랭킹 */
+.mp-dashboard-desc {
+  margin-top: 4px;
+}
+
+.mp-split {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  margin-top: 12px;
+}
+
+.mp-subtitle {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-dim);
+  margin: 0 0 10px 0;
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
+.mp-feed-section,
+.mp-rank-section {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.18);
+  padding: 12px 12px 14px;
+  min-height: 0;
+}
+
+.mp-feed-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: min(52vh, 420px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mp-feed-item {
+  font-size: 0.72rem;
+  line-height: 1.45;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: rgba(220, 228, 245, 0.92);
+}
+
+.mp-feed-list .mp-feed-item:last-child {
+  border-bottom: none;
+}
+
+.mp-feed-buy {
+  color: rgba(200, 210, 230, 0.88);
+}
+
+.mp-feed-win {
+  color: #ff4b6a;
+  font-weight: 700;
+}
+
+.mp-feed-loss {
+  color: #4f8dff;
+  font-weight: 700;
+}
+
+.mp-feed-flat {
+  color: rgba(180, 190, 210, 0.9);
+}
+
+.mp-offline-hint {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  margin: 8px 0 0;
+  line-height: 1.4;
+}
+
+.mp-leader-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: min(40vh, 360px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mp-leader-row {
+  display: grid;
+  grid-template-columns: 2rem 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 10px 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 0.76rem;
+}
+
+.mp-leader-list .mp-leader-row:last-child {
+  border-bottom: none;
+}
+
+.mp-leader-rank {
+  color: var(--text-dim);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.mp-leader-name {
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mp-leader-row--first .mp-leader-name {
+  color: #ffd76a;
+  font-weight: 800;
+}
+
+.mp-leader-row--last .mp-leader-name {
+  color: rgba(130, 140, 160, 0.75);
+  font-weight: 600;
+}
+
+.mp-leader-value {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: rgba(230, 236, 250, 0.95);
+  text-align: right;
+}
+
+@media (min-width: 640px) {
+  .mp-split {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+
+  .mp-feed-section,
+  .mp-rank-section {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .mp-feed-list {
+    max-height: 480px;
+  }
+
+  .mp-leader-list {
+    max-height: 480px;
   }
 }
