@@ -153,7 +153,24 @@ function randomInitialPrice() {
 }
 
 function clampStockPrice(p) {
-  return Math.max(MIN_STOCK_PRICE, Math.floor(Number(p)));
+  const n = Number(p);
+  if (!Number.isFinite(n)) return MIN_STOCK_PRICE;
+  return Math.max(MIN_STOCK_PRICE, Math.floor(n));
+}
+
+/** 구버전 market_state·손상 데이터로 NaN/누락 가격 복구 */
+function repairInvalidStockPrices() {
+  try {
+    stocks.forEach((s) => {
+      const v = Number(s?.price);
+      if (!Number.isFinite(v) || v < MIN_STOCK_PRICE) {
+        s.price = randomInitialPrice();
+      }
+    });
+    syncEtfPriceFromMarket();
+  } catch (e) {
+    console.warn("repairInvalidStockPrices", e);
+  }
 }
 
 const STOCK_SPECS = [
@@ -1026,6 +1043,7 @@ function renderNewsFeedFromServer(items) {
 
 function applyServerMarketState(m) {
   if (!m || m.initialized === false) return;
+  try {
   const prev = lastMarketSnapshotForDividend;
   if (!tutorialGateActive) {
     maybePayDividendFromServerTick(prev, m);
@@ -1109,12 +1127,27 @@ function applyServerMarketState(m) {
   tickInCandle = m.tickInCandle ?? 0;
   candlePeriodStartMin = m.candlePeriodStartMin ?? MARKET_OPEN_MIN;
 
+  const stockRowsById = new Map();
   (m.stocks || []).forEach((row) => {
-    const s = getStockById(row.id);
-    if (!s) return;
-    s.price = clampStockPrice(row.price);
+    if (!row || typeof row.id !== "string") return;
+    stockRowsById.set(row.id, row);
   });
-  syncEtfPriceFromMarket();
+  STOCK_SPECS.forEach((spec) => {
+    const s = getStockById(spec.id);
+    if (!s) return;
+    const row = stockRowsById.get(spec.id);
+    if (!row) {
+      s.price = randomInitialPrice();
+      return;
+    }
+    const px = Number(row.price);
+    if (!Number.isFinite(px) || px < MIN_STOCK_PRICE) {
+      s.price = randomInitialPrice();
+    } else {
+      s.price = clampStockPrice(px);
+    }
+  });
+  repairInvalidStockPrices();
 
   STOCK_SPECS.forEach((spec) => {
     const id = spec.id;
@@ -1133,8 +1166,20 @@ function applyServerMarketState(m) {
     candleOhlcBuffer = {};
     stocks.forEach((s) => {
       const b = m.candleOhlcBuffer[s.id];
-      if (b && typeof b.o === "number") {
-        candleOhlcBuffer[s.id] = { o: b.o, h: b.h, l: b.l };
+      const o = b != null ? Number(b.o) : NaN;
+      const h = b != null ? Number(b.h) : NaN;
+      const l = b != null ? Number(b.l) : NaN;
+      if (
+        b &&
+        Number.isFinite(o) &&
+        Number.isFinite(h) &&
+        Number.isFinite(l)
+      ) {
+        candleOhlcBuffer[s.id] = {
+          o: clampStockPrice(o),
+          h: clampStockPrice(h),
+          l: clampStockPrice(l),
+        };
       } else {
         candleOhlcBuffer[s.id] = { o: s.price, h: s.price, l: s.price };
       }
@@ -1172,6 +1217,10 @@ function applyServerMarketState(m) {
   updatePremarketChartOverlay();
   syncTradeButtons();
   syncNextTurnButton();
+  } catch (e) {
+    console.warn("applyServerMarketState", e);
+    repairInvalidStockPrices();
+  }
 }
 
 /** 온보딩(캐릭터 미완료)·튜토리얼·로그인 전: 시장 관련 토스트 숨김 */
@@ -1211,8 +1260,25 @@ function shouldSeedMarketState(serverState) {
   if (serverState == null) return true;
   if (typeof serverState !== "object") return true;
   if (serverState.initialized === false) return true;
-  if (!Array.isArray(serverState.stocks) || serverState.stocks.length === 0) {
+  const rows = serverState.stocks;
+  if (!Array.isArray(rows) || rows.length === 0) {
     return true;
+  }
+  const byId = new Map();
+  rows.forEach((row) => {
+    if (row && typeof row.id === "string") byId.set(row.id, row);
+  });
+  if (byId.size < STOCK_SPECS.length) {
+    return true;
+  }
+  for (let i = 0; i < STOCK_SPECS.length; i += 1) {
+    const spec = STOCK_SPECS[i];
+    const row = byId.get(spec.id);
+    if (!row) return true;
+    const px = Number(row.price);
+    if (!Number.isFinite(px) || px < MIN_STOCK_PRICE) {
+      return true;
+    }
   }
   return false;
 }
@@ -1337,8 +1403,12 @@ function advanceOneGameMinuteOnline() {
     stocks.forEach((s) => {
       const b = candleOhlcBuffer[s.id];
       if (b) {
-        b.h = Math.max(b.h, s.price);
-        b.l = Math.min(b.l, s.price);
+        const px = Number(s.price);
+        const p = Number.isFinite(px) ? px : MIN_STOCK_PRICE;
+        const bh = Number(b.h);
+        const bl = Number(b.l);
+        b.h = Number.isFinite(bh) ? Math.max(bh, p) : p;
+        b.l = Number.isFinite(bl) ? Math.min(bl, p) : p;
       }
     });
     gameMinutes += GAME_MINUTES_PER_REAL_SEC;
@@ -2025,10 +2095,10 @@ function normalizeCandleRow(r) {
     periodStartMin,
     gameTimeOrdinal,
     x: r.x || formatCandleXLabel(dayIndex, periodStartMin),
-    o: Math.floor(Number(r.o)),
-    h: Math.floor(Number(r.h)),
-    l: Math.floor(Number(r.l)),
-    c: Math.floor(Number(r.c)),
+    o: clampStockPrice(r.o),
+    h: clampStockPrice(r.h),
+    l: clampStockPrice(r.l),
+    c: clampStockPrice(r.c),
   };
 }
 
@@ -2766,30 +2836,52 @@ function renderPendingOrdersUi() {
 
 async function processPendingOrdersMatchAsync() {
   if (tutorialGateActive || pendingOrders.length === 0) return;
+  const snapshot = pendingOrders.slice();
   const keep = [];
-  for (const o of pendingOrders) {
-    const s = getStockById(o.symbol);
-    if (!s) {
-      keep.push(o);
-      continue;
+  try {
+    for (const o of snapshot) {
+      if (!o || typeof o.symbol !== "string") {
+        if (o) keep.push(o);
+        continue;
+      }
+      const lim = Number(o.limitPrice);
+      const q = Math.floor(Number(o.qty));
+      if (!Number.isFinite(lim) || !Number.isFinite(q) || q <= 0) {
+        keep.push(o);
+        continue;
+      }
+      const s = getStockById(o.symbol);
+      if (!s) {
+        keep.push(o);
+        continue;
+      }
+      const px = Number(s.price);
+      if (!Number.isFinite(px) || px < MIN_STOCK_PRICE) {
+        keep.push(o);
+        continue;
+      }
+      const hit =
+        o.side === "buy" ? px <= lim : px >= lim;
+      if (!hit) {
+        keep.push(o);
+        continue;
+      }
+      const r =
+        o.side === "buy"
+          ? await buyStock(o.symbol, String(q), "shares")
+          : await sellStock(o.symbol, String(q), "shares");
+      if (!r.ok) {
+        keep.push(o);
+        continue;
+      }
+      setMessage(`${o.symbol} 지정가 예약이 체결되었습니다.`, "ok");
     }
-    const hit =
-      o.side === "buy"
-        ? s.price <= o.limitPrice
-        : s.price >= o.limitPrice;
-    if (!hit) {
-      keep.push(o);
-      continue;
-    }
-    const r =
-      o.side === "buy"
-        ? await buyStock(o.symbol, String(o.qty), "shares")
-        : await sellStock(o.symbol, String(o.qty), "shares");
-    if (!r.ok) {
-      keep.push(o);
-      continue;
-    }
-    setMessage(`${o.symbol} 지정가 예약이 체결되었습니다.`, "ok");
+  } catch (e) {
+    console.warn("processPendingOrdersMatchAsync", e);
+    pendingOrders = snapshot;
+    renderPendingOrdersUi();
+    schedulePersistUser();
+    return;
   }
   pendingOrders = keep;
   renderPendingOrdersUi();
@@ -2804,19 +2896,28 @@ function processPendingOrdersMatch() {
 
 /** 일반 종목 평균가 → ETF 1주 가격 (뉴스·개별 틱 없음) */
 function syncEtfPriceFromMarket() {
-  const etf = getStockById("MIX");
-  if (!etf) return;
-  let sum = 0;
-  let n = 0;
-  STOCK_SPECS.forEach((spec) => {
-    if (spec.kind === "etf") return;
-    const st = getStockById(spec.id);
-    if (st) {
-      sum += st.price;
+  try {
+    const etf = getStockById("MIX");
+    if (!etf) return;
+    let sum = 0;
+    let n = 0;
+    STOCK_SPECS.forEach((spec) => {
+      if (spec.kind === "etf") return;
+      const st = getStockById(spec.id);
+      if (!st) return;
+      const p = Number(st.price);
+      if (!Number.isFinite(p) || p < MIN_STOCK_PRICE) return;
+      sum += p;
       n += 1;
+    });
+    if (n > 0) {
+      etf.price = clampStockPrice(Math.floor(sum / n));
+    } else {
+      etf.price = clampStockPrice(etf.price);
     }
-  });
-  if (n > 0) etf.price = clampStockPrice(Math.floor(sum / n));
+  } catch (e) {
+    console.warn("syncEtfPriceFromMarket", e);
+  }
 }
 
 /**
@@ -3215,11 +3316,18 @@ function initDetailCharts(stockId) {
     yaxis: { show: false },
   };
 
-  apexDetail.candle = new ApexCharts(cEl, candleOpts);
-  apexDetail.vol = new ApexCharts(vEl, volOpts);
-  apexDetail.stockId = stockId;
-  apexDetail.candle.render();
-  apexDetail.vol.render();
+  try {
+    apexDetail.candle = new ApexCharts(cEl, candleOpts);
+    apexDetail.vol = new ApexCharts(vEl, volOpts);
+    apexDetail.stockId = stockId;
+    apexDetail.candle.render();
+    apexDetail.vol.render();
+  } catch (e) {
+    console.warn("initDetailCharts", e);
+    apexDetail.candle = null;
+    apexDetail.vol = null;
+    apexDetail.stockId = null;
+  }
 }
 
 function refreshDetailChart() {
@@ -3761,6 +3869,10 @@ function updateDetailPriceLine() {
 function openStockDetail(stockId) {
   const s = getStockById(stockId);
   if (!s) return;
+  const sp0 = Number(s.price);
+  if (!Number.isFinite(sp0) || sp0 < MIN_STOCK_PRICE) {
+    repairInvalidStockPrices();
+  }
 
   selectedStockId = stockId;
   syncTradeButtons();
@@ -4159,8 +4271,12 @@ function onSessionSecondTick() {
     stocks.forEach((s) => {
       const b = candleOhlcBuffer[s.id];
       if (b) {
-        b.h = Math.max(b.h, s.price);
-        b.l = Math.min(b.l, s.price);
+        const px = Number(s.price);
+        const p = Number.isFinite(px) ? px : MIN_STOCK_PRICE;
+        const bh = Number(b.h);
+        const bl = Number(b.l);
+        b.h = Number.isFinite(bh) ? Math.max(bh, p) : p;
+        b.l = Number.isFinite(bl) ? Math.min(bl, p) : p;
       }
     });
     gameMinutes += GAME_MINUTES_PER_REAL_SEC;
