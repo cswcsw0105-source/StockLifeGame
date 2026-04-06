@@ -12,24 +12,30 @@ export const NEXT_TRADING_DAY_DELAY_MS = 2200;
 export const MAX_CANDLES_PER_STOCK = 2000;
 export const MAX_NEWS_FEED = 48;
 
+/** 동전주 최저가 방어(원) — script.js 와 동일 */
+export const MIN_STOCK_PRICE = 30;
+
+/** 찌라시 비율 — script.js 와 동일(체이닝 페이로드는 찌라시면 스파이크 없음) */
+const RUMOR_FRACTION = 0.3;
+function rollIsRumor(): boolean {
+  return Math.random() < RUMOR_FRACTION;
+}
+
 export const STOCK_SPECS = [
-  { id: "JBD", name: "재빈디자인", volatility: "high" as const },
-  { id: "SYW", name: "승윤윙즈", volatility: "high" as const },
-  { id: "MJS", name: "민준스테이", volatility: "medium" as const },
-  { id: "BSL", name: "범서랩", volatility: "medium" as const },
-  { id: "SYG", name: "석영기어", volatility: "high" as const },
-  { id: "JWF", name: "진우펀드", volatility: "low" as const },
-  { id: "YHL", name: "요한룩", volatility: "medium" as const },
-  { id: "SWB", name: "선웅비즈", volatility: "low" as const },
-];
+  { id: "JBD", name: "재빈디자인" },
+  { id: "SYW", name: "승윤윙즈" },
+  { id: "MJS", name: "민준스테이" },
+  { id: "BSL", name: "범서랩" },
+  { id: "SYG", name: "석영기어" },
+  { id: "JWF", name: "진우펀드" },
+  { id: "YHL", name: "요한룩" },
+  { id: "SWB", name: "선웅비즈" },
+] as const;
 
 export type StockRow = {
   id: string;
   name: string;
   price: number;
-  volatility: "high" | "medium" | "low";
-  volatilityMod: number;
-  priceBias: number;
 };
 
 export type MarketState = {
@@ -44,6 +50,8 @@ export type MarketState = {
   scheduledEvents: Record<string, unknown>[];
   newsCountByStock: Record<string, number>;
   chainStepByStock: Record<string, number>;
+  newsSpikeTicksLeft: Record<string, number>;
+  newsSpikeDirection: Record<string, number>;
   dividendCandleCounter: number;
   sessionCandleCount: number;
   tickInCandle: number;
@@ -75,15 +83,44 @@ function emptyChain(): Record<string, number> {
 }
 
 function randomInitialPrice(): number {
-  return Math.floor(10_000 + Math.random() * 40_001);
+  return Math.floor(100 + Math.random() * 101);
 }
 
-function gaussian(): number {
-  let u = 0;
-  let v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
-  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+function clampStockPrice(p: number): number {
+  return Math.max(MIN_STOCK_PRICE, Math.floor(Number(p)));
+}
+
+function ensureNewsSpikeFields(st: MarketState): void {
+  if (!st.newsSpikeTicksLeft || typeof st.newsSpikeTicksLeft !== "object") {
+    st.newsSpikeTicksLeft = emptyChain();
+  }
+  if (!st.newsSpikeDirection || typeof st.newsSpikeDirection !== "object") {
+    st.newsSpikeDirection = {};
+    STOCK_SPECS.forEach((s) => {
+      st.newsSpikeDirection[s.id] = 1;
+    });
+  }
+  STOCK_SPECS.forEach((s) => {
+    const t = st.newsSpikeTicksLeft[s.id];
+    st.newsSpikeTicksLeft[s.id] = typeof t === "number" && Number.isFinite(t) ? Math.max(0, Math.floor(t)) : 0;
+    st.newsSpikeDirection[s.id] = st.newsSpikeDirection[s.id] === -1 ? -1 : 1;
+  });
+}
+
+function normalizeLoadedStocks(st: MarketState): void {
+  const byId = new Map(st.stocks.map((r) => [r.id, r]));
+  st.stocks = STOCK_SPECS.map((spec) => {
+    const row = byId.get(spec.id);
+    const raw = row?.price ?? randomInitialPrice();
+    return { id: spec.id, name: spec.name, price: clampStockPrice(raw) };
+  });
+}
+
+function resetNewsSpikeState(st: MarketState): void {
+  st.newsSpikeTicksLeft = emptyChain();
+  STOCK_SPECS.forEach((s) => {
+    st.newsSpikeDirection[s.id] = 1;
+  });
 }
 
 function formatMinuteOfDay(totalMin: number): string {
@@ -158,38 +195,38 @@ function getStock(st: MarketState, id: string): StockRow | undefined {
   return st.stocks.find((s) => s.id === id);
 }
 
-function returnForStock(s: StockRow, headlineImpulse: number, marketFactor: number, idio: number): number {
-  const vm = s.volatilityMod;
-  const headlineBlend = 0.82 + 0.18 * Math.min(vm, 2.2);
-  const noiseBlend = 0.72 + 0.28 * Math.min(vm, 2.2);
-  const biasTerm = s.priceBias * 0.022;
-  if (s.volatility === "high") {
-    return 0.1 * marketFactor + 2.15 * headlineImpulse * headlineBlend + 0.0062 * idio * noiseBlend + biasTerm;
-  }
-  if (s.volatility === "medium") {
-    return 0.48 * marketFactor + 0.52 * headlineImpulse * headlineBlend + 0.002 * idio * noiseBlend + biasTerm;
-  }
-  return 0.975 * marketFactor + 0.055 * headlineImpulse * headlineBlend + 0.00042 * idio * noiseBlend + biasTerm;
+function scheduleNewsSpikeForStock(st: MarketState, stockId: string, directionSign: number): void {
+  if (!getStock(st, stockId)) return;
+  const ticks = 3 + Math.floor(Math.random() * 3);
+  st.newsSpikeTicksLeft[stockId] = Math.max(st.newsSpikeTicksLeft[stockId] || 0, ticks);
+  st.newsSpikeDirection[stockId] = directionSign >= 0 ? 1 : -1;
 }
 
-function decayVolatilityMods(st: MarketState): void {
-  st.stocks.forEach((s) => {
-    const m = s.volatilityMod;
-    s.volatilityMod = Math.max(1, 1 + (m - 1) * 0.966);
+function scheduleNewsSpikeFromImpacts(st: MarketState, impacts: Record<string, number>): void {
+  Object.entries(impacts).forEach(([id, raw]) => {
+    const imp = Number(raw);
+    if (!imp || !Number.isFinite(imp)) return;
+    scheduleNewsSpikeForStock(st, id, imp > 0 ? 1 : -1);
   });
 }
 
 function oneMicroPriceStep(st: MarketState): void {
-  const marketFactor = 0.00011 * gaussian() + 0.000032;
-  if (Math.random() < 0.028) {
-    const dir = Math.random() < 0.5 ? -1 : 1;
-    st.headlineImpulse += dir * (0.0035 + Math.random() * 0.016);
-  }
-  st.headlineImpulse *= 0.935;
   st.stocks.forEach((s) => {
-    const idio = gaussian();
-    const r = returnForStock(s, st.headlineImpulse, marketFactor, idio);
-    s.price = Math.round(Math.max(1_000, s.price * (1 + r)));
+    const id = s.id;
+    const spikeLeft = st.newsSpikeTicksLeft[id] ?? 0;
+    let delta = 0;
+    if (spikeLeft > 0) {
+      st.newsSpikeTicksLeft[id] = spikeLeft - 1;
+      const up = (st.newsSpikeDirection[id] ?? 1) >= 0;
+      if (up) {
+        delta = 20 + Math.floor(Math.random() * 31);
+      } else {
+        delta = -(20 + Math.floor(Math.random() * 21));
+      }
+    } else {
+      delta = -2 + Math.floor(Math.random() * 5);
+    }
+    s.price = clampStockPrice(s.price + delta);
   });
 }
 
@@ -211,10 +248,10 @@ function pushCandleRow(
 ): void {
   const row: CandleRow = {
     x: formatCandleXLabel(candleDayIndex, periodStartMin),
-    o: Math.round(open),
-    h: Math.round(high),
-    l: Math.round(low),
-    c: Math.round(close),
+    o: Math.floor(open),
+    h: Math.floor(high),
+    l: Math.floor(low),
+    c: Math.floor(close),
     v: Math.round(volume),
   };
   if (!st.candleHistory[stockId]) st.candleHistory[stockId] = [];
@@ -232,33 +269,8 @@ function beginCandlePeriodIfNeeded(st: MarketState): void {
   });
 }
 
-function applyImpactFormula(st: MarketState, impacts: Record<string, number>): void {
-  Object.entries(impacts).forEach(([id, impact]) => {
-    const s = getStock(st, id);
-    if (!s) return;
-    s.price = Math.round(Math.max(1_000, s.price * (1 + impact)));
-  });
-}
-
-function applyBiasDeltas(st: MarketState, biasMap: Record<string, number> | undefined): void {
-  if (!biasMap) return;
-  Object.entries(biasMap).forEach(([id, b]) => {
-    const s = getStock(st, id);
-    if (!s) return;
-    s.priceBias += b;
-    s.priceBias = Math.max(-0.12, Math.min(0.12, s.priceBias));
-  });
-}
-
-function applyNewsPayload(st: MarketState, ev: { impacts?: Record<string, number>; bias?: Record<string, number>; volFactor?: number }): void {
-  applyImpactFormula(st, ev.impacts || {});
-  applyBiasDeltas(st, ev.bias);
-  if (ev.volFactor && ev.impacts) {
-    Object.keys(ev.impacts).forEach((id) => {
-      const s = getStock(st, id);
-      if (s) s.volatilityMod = Math.min(2.85, s.volatilityMod * (ev.volFactor ?? 1));
-    });
-  }
+function applyNewsPayload(st: MarketState, ev: { impacts?: Record<string, number> }): void {
+  scheduleNewsSpikeFromImpacts(st, ev.impacts || {});
 }
 
 function tryFireChainNews(st: MarketState, completedCandleCount: number): void {
@@ -269,15 +281,15 @@ function tryFireChainNews(st: MarketState, completedCandleCount: number): void {
     if (step >= sched.length || st.newsCountByStock[stockId] >= 3) return;
     if (completedCandleCount !== sched[step]) return;
     const story = NEWS_CHAINS[stockId][step];
+    const asRumor = rollIsRumor();
     pushNews(st, story.headline, "chain");
-    applyNewsPayload(st, story);
+    if (!asRumor) applyNewsPayload(st, story);
     st.chainStepByStock[stockId] += 1;
     st.newsCountByStock[stockId] += 1;
   });
 }
 
 function sealCurrentCandleAndReset(st: MarketState): void {
-  decayVolatilityMods(st);
   const periodStart = st.candlePeriodStartMin;
   st.stocks.forEach((s) => {
     const b = st.candleOhlcBuffer[s.id];
@@ -292,7 +304,6 @@ function sealCurrentCandleAndReset(st: MarketState): void {
       ),
     );
     pushCandleRow(st, s.id, st.gameDayIndex, periodStart, o, h, l, close, vol);
-    s.priceBias *= 0.88;
   });
   st.sessionCandleCount += 1;
   st.dividendCandleCounter += 1;
@@ -311,15 +322,7 @@ function fireDueCalendarEvents(st: MarketState): void {
     (e.targets || []).forEach((id: string) => {
       impacts[id] = e.shock ?? 0;
     });
-    applyImpactFormula(st, impacts);
-    (e.targets || []).forEach((id: string) => {
-      const s = getStock(st, id);
-      if (!s) return;
-      s.volatilityMod = Math.min(2.85, s.volatilityMod * (e.volBump ?? 1));
-      const b = e.sentiment === "good" ? 0.0055 : -0.0055;
-      s.priceBias += b;
-      s.priceBias = Math.max(-0.12, Math.min(0.12, s.priceBias));
-    });
+    scheduleNewsSpikeFromImpacts(st, impacts);
   });
 }
 
@@ -370,6 +373,8 @@ export function createInitialMarketState(): MarketState {
     scheduledEvents: buildInitialCalendar(),
     newsCountByStock: emptyChain(),
     chainStepByStock: emptyChain(),
+    newsSpikeTicksLeft: emptyChain(),
+    newsSpikeDirection: Object.fromEntries(STOCK_SPECS.map((s) => [s.id, 1])),
     dividendCandleCounter: 0,
     sessionCandleCount: 0,
     tickInCandle: 0,
@@ -379,9 +384,6 @@ export function createInitialMarketState(): MarketState {
       id: spec.id,
       name: spec.name,
       price: randomInitialPrice(),
-      volatility: spec.volatility,
-      volatilityMod: 1,
-      priceBias: 0,
     })),
     candleHistory: Object.fromEntries(STOCK_SPECS.map((s) => [s.id, [] as CandleRow[]])),
     sessionOpenPrice: {},
@@ -390,6 +392,9 @@ export function createInitialMarketState(): MarketState {
     nextOpenAtMs: null,
   };
   for (let i = 0; i < 96; i += 1) oneMicroPriceStep(st);
+  st.stocks.forEach((s) => {
+    s.price = clampStockPrice(s.price);
+  });
   snapshotSessionOpen(st);
   st.stocks.forEach((s) => {
     st.candleOhlcBuffer[s.id] = { o: s.price, h: s.price, l: s.price };
@@ -428,9 +433,7 @@ function openNextTradingDay(st: MarketState): void {
   st.headlineImpulse *= 0.4;
   resetDailyNewsState(st);
   st.dividendCandleCounter = 0;
-  st.stocks.forEach((s) => {
-    s.priceBias = 0;
-  });
+  resetNewsSpikeState(st);
   ensureCalendarHorizon(st);
   fireDueCalendarEvents(st);
   finishOpenNextTradingDay(st);
@@ -467,6 +470,9 @@ export function advanceServerSecond(raw: Record<string, unknown> | null): Market
     st = createInitialMarketState();
   } else {
     st = raw as unknown as MarketState;
+    if (!Array.isArray(st.stocks)) st.stocks = [];
+    normalizeLoadedStocks(st);
+    ensureNewsSpikeFields(st);
   }
   st.serverTick = (st.serverTick || 0) + 1;
 

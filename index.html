@@ -126,16 +126,6 @@
             <time id="gameDateTime" class="mts-clock" aria-live="polite"
               >[1년차 4월 1일 09:00]</time
             >
-            <button
-              type="button"
-              id="btnPause"
-              class="mts-icon-btn"
-              aria-pressed="false"
-              aria-label="시간 멈춤"
-            >
-              <span class="mts-pause-icon" aria-hidden="true">⏸</span>
-              <span class="mts-pause-label">멈춤</span>
-            </button>
           </div>
         </header>
 
@@ -223,9 +213,22 @@
                 >
                   <span class="watchlist-star" aria-hidden="true">☆</span>
                 </button>
-                <span id="detailVolBadge" class="mts-badge"></span>
               </div>
               <p id="detailStockDesc" class="stock-detail-desc"></p>
+              <div
+                id="detailChartRangeBar"
+                class="detail-chart-range-bar"
+                role="toolbar"
+                aria-label="차트 기간"
+              >
+                <button type="button" class="detail-chart-range-btn is-active" data-chart-range="all">
+                  전체
+                </button>
+                <button type="button" class="detail-chart-range-btn" data-chart-range="d2">2일</button>
+                <button type="button" class="detail-chart-range-btn" data-chart-range="d5">5일</button>
+                <button type="button" class="detail-chart-range-btn" data-chart-range="w1">1주</button>
+                <button type="button" class="detail-chart-range-btn" data-chart-range="m1">1달</button>
+              </div>
               <div class="chart-stack">
                 <div
                   id="chartPremarketOverlay"
