@@ -993,8 +993,46 @@ body {
   margin-bottom: 4px;
 }
 
+.news-item-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 6px;
+}
+
+.news-stock-tags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-right: 6px;
+  vertical-align: baseline;
+}
+
+.news-stock-tag {
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  padding: 2px 6px;
+  border-radius: 6px;
+  line-height: 1.2;
+}
+
+.news-tag-fav {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+}
+
+.news-tag-own {
+  color: #6ee7b7;
+  background: rgba(52, 211, 153, 0.1);
+  border: 1px solid rgba(52, 211, 153, 0.3);
+}
+
 .news-text {
   line-height: 1.45;
+  flex: 1;
+  min-width: 0;
 }
 
 .news-item.news-dividend {
@@ -1733,11 +1771,24 @@ body {
   margin-bottom: 4px;
 }
 
+.detail-news-text-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 8px;
+}
+
+.detail-news-text-row .news-stock-tags {
+  margin-right: 2px;
+}
+
 .detail-news-text {
   margin: 0;
   font-size: 0.86rem;
   line-height: 1.45;
   color: rgba(255, 255, 255, 0.88);
+  flex: 1;
+  min-width: 0;
 }
 
 .detail-news-empty {
