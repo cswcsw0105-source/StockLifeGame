@@ -602,15 +602,21 @@ function matchesMainNewsFilter(it) {
 }
 
 function syncTradeButtons() {
-  const canMarket =
-    isRegularSession() && !isTradeBlockedByPenalty();
-  const canLimit =
-    isLimitOrderWindowAllowed() && !isTradeBlockedByPenalty();
+  const penalty = isTradeBlockedByPenalty();
+  // 정규장(09:00~15:30): 시장가 즉시 매매
+  const canMarket = isRegularSession() && !penalty;
+  // 정규장 + 시간외(15:30~16:30): 지정가 예약만 (isLimitOrderWindowAllowed)
+  const canLimit = isLimitOrderWindowAllowed() && !penalty;
+  // 메인 종목표 매수/매도: 항상 시장가 RPC → 정규장에서만
+  const canTrade = canMarket;
+  // 상세 매수/매도: 주문 유형에 따라 (시장가=정규장, 지정가=정규+시간외)
+  const detailTradeOk =
+    detailTradeOrderType === "limit" ? canLimit : canMarket;
   ["detailBtnBuy", "detailBtnSell"].forEach((id) => {
     const el = document.getElementById(id);
     if (el) {
-      el.disabled = !canMarket;
-      el.classList.toggle("is-trade-locked", !canMarket);
+      el.disabled = !detailTradeOk;
+      el.classList.toggle("is-trade-locked", !detailTradeOk);
     }
   });
   document.querySelectorAll("#stockRows button[data-action]").forEach((btn) => {
