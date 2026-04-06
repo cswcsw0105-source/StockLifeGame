@@ -21,6 +21,11 @@ const LS_TUTORIAL_DONE_KEY = "stockLifeTutorialV1Done";
 let tutorialGateActive = false;
 
 const MAX_NEWS_ITEMS = 48;
+/** 찌라시 비율 — 화면에만 표시, 시세·페이로드(체이닝 impact 등) 반영 없음. 갭·프리마켓 카운트 로직은 변경하지 않음 */
+const RUMOR_FRACTION = 0.3;
+function rollIsRumor() {
+  return Math.random() < RUMOR_FRACTION;
+}
 const NEXT_TRADING_DAY_DELAY_MS = 2200;
 const INITIAL_CAPITAL = 10_000_000;
 /** 게임 캘린더 매월 1일 자동 입금 */
@@ -799,6 +804,22 @@ function clearNewsFeedRevealTimers() {
   newsFeedRevealTimers = [];
 }
 
+function appendStockNewsTags(container, stockId) {
+  if (!stockId || !container) return;
+  if (watchlistIds.includes(stockId)) {
+    const tag = document.createElement("span");
+    tag.className = "news-stock-tag news-tag-fav";
+    tag.textContent = "[관심]";
+    container.appendChild(tag);
+  }
+  if ((game.holdings[stockId] ?? 0) > 0) {
+    const tag = document.createElement("span");
+    tag.className = "news-stock-tag news-tag-own";
+    tag.textContent = "[보유]";
+    container.appendChild(tag);
+  }
+}
+
 function renderNewsFeedFromServer(items) {
   const list = document.getElementById("newsFeed");
   if (!list || !Array.isArray(items)) return;
@@ -817,11 +838,18 @@ function renderNewsFeedFromServer(items) {
       minute: "2-digit",
       second: "2-digit",
     });
+    const body = document.createElement("span");
+    body.className = "news-item-body";
+    const tagWrap = document.createElement("span");
+    tagWrap.className = "news-stock-tags";
+    appendStockNewsTags(tagWrap, it.stockId);
+    if (tagWrap.childNodes.length > 0) body.appendChild(tagWrap);
     const textEl = document.createElement("span");
     textEl.className = "news-text";
     textEl.textContent = it.text || "";
+    body.appendChild(textEl);
     li.appendChild(timeEl);
-    li.appendChild(textEl);
+    li.appendChild(body);
     list.appendChild(li);
   });
   if (selectedStockId) renderDetailStockNewsSection();
@@ -922,6 +950,7 @@ function applyServerMarketState(m) {
           stockId: it.stockId,
           global: it.global === true,
           subline: it.subline,
+          is_rumor: it.is_rumor === true,
         }))
         .slice(0, MAX_NEWS_ITEMS)
     : [];
@@ -993,6 +1022,7 @@ function serializeMarketState() {
       stockId: it.stockId,
       global: it.global === true,
       subline: it.subline,
+      is_rumor: it.is_rumor === true,
     })),
   };
 }
@@ -1778,6 +1808,7 @@ function releasePremarketNewsForMinute(minute) {
     const type = ev.positive ? "premarket-pos" : "premarket-neg";
     addNewsItem(buildPremarketHeadline(ev.stockId, ev.positive), type, "", {
       stockId: ev.stockId,
+      is_rumor: rollIsRumor(),
     });
   });
 }
@@ -2269,6 +2300,7 @@ function sealCurrentCandleAndReset() {
     (gameMinutes - MARKET_OPEN_MIN) / CANDLE_GAME_MINUTES
   );
   tryFireChainNews(completed);
+  tryEmitExtraRumorChatter();
   tickInCandle = 0;
 }
 
@@ -2602,7 +2634,15 @@ function renderDetailStockNewsSection() {
   const ul = document.getElementById("detailStockNewsList");
   if (!ul || !selectedStockId) return;
   const id = selectedStockId;
-  const items = serverNewsFeedItems.filter((it) => it.stockId === id);
+  const s = getStockById(id);
+  const nameOk = s?.name ? String(s.name) : "";
+  const items = serverNewsFeedItems
+    .filter((it) => {
+      if (it.stockId === id) return true;
+      if (nameOk && it.text && String(it.text).includes(nameOk)) return true;
+      return false;
+    })
+    .sort((a, b) => new Date(b.ts || 0) - new Date(a.ts || 0));
   ul.innerHTML = "";
   if (items.length === 0) {
     const li = document.createElement("li");
@@ -2623,11 +2663,18 @@ function renderDetailStockNewsSection() {
       hour: "2-digit",
       minute: "2-digit",
     });
+    const row = document.createElement("div");
+    row.className = "detail-news-text-row";
+    const tagWrap = document.createElement("span");
+    tagWrap.className = "news-stock-tags";
+    appendStockNewsTags(tagWrap, it.stockId);
     const p = document.createElement("p");
     p.className = "detail-news-text";
     p.textContent = it.text || "";
+    if (tagWrap.childNodes.length > 0) row.appendChild(tagWrap);
+    row.appendChild(p);
     li.appendChild(timeEl);
-    li.appendChild(p);
+    li.appendChild(row);
     ul.appendChild(li);
   });
 }
@@ -2730,6 +2777,7 @@ function addNewsItem(text, type = "news", subline = "", meta = {}) {
     subline: subline || "",
     stockId: meta.stockId,
     global: meta.global === true,
+    is_rumor: meta.is_rumor === true,
   };
   if (onlineMode && onlineLeaderSimulating) {
     serverNewsFeedItems.unshift(item);
@@ -2747,6 +2795,24 @@ function addNewsItem(text, type = "news", subline = "", meta = {}) {
   triggerNewsShake();
 }
 
+/** 장중 봉 확정 시 가끔 추가 찌라시 한 줄(시세 무관) — 피드만 시끌벅적하게 */
+function tryEmitExtraRumorChatter() {
+  if (tutorialGateActive) return;
+  if (!isTradingWindowActive()) return;
+  if (Math.random() >= 0.14) return;
+  const s = stocks[Math.floor(Math.random() * stocks.length)];
+  if (!s) return;
+  const lines = [
+    () => `[소문] ${s.name} — 거래소 인근에서 '큰 손' 이야기만 무성합니다`,
+    () => `[익명] ${s.name} 관련 내부 메모가 돌고 있다는 말이 나옵니다`,
+    () => `[찌라시] ${s.name}, 실적 시즌 전 '깜짝 변수' 거론되나 확인 불가`,
+    () => `[현장] ${s.name} 앞 증권가 TV에 단골 애널리스트가 잠복 중이랍니다`,
+    () => `[단톡] ${s.name} — 지인의 지인의 펀드매니저가 뭐라던데…`,
+  ];
+  const line = lines[Math.floor(Math.random() * lines.length)]();
+  addNewsItem(line, "ambient", "", { stockId: s.id, is_rumor: true });
+}
+
 function tryFireChainNews(completedCandleCount) {
   Object.keys(NEWS_CHAINS).forEach((stockId) => {
     const sched = CHAIN_SCHEDULE[stockId];
@@ -2756,8 +2822,9 @@ function tryFireChainNews(completedCandleCount) {
     if (completedCandleCount !== sched[step]) return;
 
     const story = NEWS_CHAINS[stockId][step];
-    addNewsItem(story.headline, "chain", "", { stockId });
-    applyNewsPayload(story);
+    const asRumor = rollIsRumor();
+    addNewsItem(story.headline, "chain", "", { stockId, is_rumor: asRumor });
+    if (!asRumor) applyNewsPayload(story);
     chainStepByStock[stockId] += 1;
     newsCountByStock[stockId] += 1;
   });
@@ -2797,7 +2864,10 @@ function scheduleAmbientNewsTimer() {
           AMBIENT_NEWS_TEMPLATES[
             Math.floor(Math.random() * AMBIENT_NEWS_TEMPLATES.length)
           ];
-        addNewsItem(tpl(s.name), "ambient", "", { stockId: sid });
+        addNewsItem(tpl(s.name), "ambient", "", {
+          stockId: sid,
+          is_rumor: rollIsRumor(),
+        });
       }
     }
     if (shouldAdvanceMarketClock()) scheduleAmbientNewsTimer();
