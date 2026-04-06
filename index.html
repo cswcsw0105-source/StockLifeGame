@@ -422,10 +422,36 @@
                   <tbody id="stockRows"></tbody>
                 </table>
               </div>
-              <div class="portfolio-actions">
-                <button type="button" id="btnNextTurn" class="btn-mts primary">
-                  다음 턴 (1년)
-                </button>
+            </section>
+          </div>
+
+          <div
+            id="tab-arena"
+            class="tab-panel"
+            role="tabpanel"
+            hidden
+            aria-labelledby="tab-btn-arena"
+          >
+            <section class="mts-section mp-dashboard">
+              <h2 class="mts-section-title">개미지옥</h2>
+              <p class="mts-section-desc mp-dashboard-desc">
+                실시간 매매 피드와 자산 랭킹 — 온라인(Supabase) 접속 시 갱신됩니다.
+              </p>
+              <div class="mp-split">
+                <div class="mp-feed-section">
+                  <h3 class="mp-subtitle">실시간 매매 피드</h3>
+                  <ul id="mpTradeFeed" class="mp-feed-list" aria-live="polite"></ul>
+                  <p id="mpFeedOfflineHint" class="mp-offline-hint" hidden>
+                    Supabase 연결 후 실시간 피드를 볼 수 있습니다.
+                  </p>
+                </div>
+                <div class="mp-rank-section">
+                  <h3 class="mp-subtitle">잔혹한 자산 랭킹</h3>
+                  <ol id="mpLeaderboard" class="mp-leader-list" start="1"></ol>
+                  <p id="mpRankOfflineHint" class="mp-offline-hint" hidden>
+                    온라인 모드에서 랭킹이 표시됩니다.
+                  </p>
+                </div>
               </div>
             </section>
           </div>
@@ -490,6 +516,17 @@
           >
             <span class="tab-bar-icon" aria-hidden="true">💼</span>
             <span class="tab-bar-label">내 투자</span>
+          </button>
+          <button
+            type="button"
+            class="tab-bar-btn"
+            id="tab-btn-arena"
+            role="tab"
+            aria-selected="false"
+            data-tab="arena"
+          >
+            <span class="tab-bar-icon" aria-hidden="true">🐜</span>
+            <span class="tab-bar-label">개미지옥</span>
           </button>
           <button
             type="button"

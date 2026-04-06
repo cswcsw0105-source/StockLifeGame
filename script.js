@@ -13,6 +13,8 @@ const TBL_USERS = "users";
 const TBL_PORTFOLIOS = "portfolios";
 const TBL_MARKET_STATE = "market_state";
 const TBL_SOCIAL_TRADE = "social_trade_events";
+/** 실시간 매매 피드 — `trade_logs` (Supabase Realtime INSERT) */
+const TBL_TRADE_LOGS = "trade_logs";
 
 /** 온보딩 튜토리얼 1회 완료 플래그 (브라우저 로컬) */
 const LS_TUTORIAL_DONE_KEY = "stockLifeTutorialV1Done";
@@ -287,6 +289,10 @@ let onlineMode = false;
 let marketChannel = null;
 /** 친구 풀매수/풀매도 Realtime */
 let socialTradeChannel = null;
+/** 개미지옥: trade_logs + users/portfolios Realtime */
+let multiplayerChannel = null;
+let mpTradeLogIdsSeen = new Set();
+let mpLeaderboardDebounceId = null;
 let friendTradeToastTimer = null;
 /** 온라인: 10초마다 리더 선출 → 시장 1스텝 DB 반영 (Edge 없음) */
 let marketClientTickId = null;
@@ -707,7 +713,6 @@ function finishRollToPreMarketDay() {
   }
 
   schedulePersistUser();
-  syncNextTurnButton();
   syncTradeButtons();
 }
 
@@ -763,7 +768,6 @@ function routeOnboardingScreens() {
     renderLifeStatus();
     renderStocks();
     syncTradeButtons();
-    syncNextTurnButton();
     requestAnimationFrame(() => document.getElementById("setupPlayerName")?.focus());
     return;
   }
@@ -773,7 +777,6 @@ function routeOnboardingScreens() {
     renderLifeStatus();
     renderStocks();
     syncTradeButtons();
-    syncNextTurnButton();
     requestAnimationFrame(() => document.getElementById("btnTutorialDismiss")?.focus());
     return;
   }
@@ -782,7 +785,6 @@ function routeOnboardingScreens() {
   renderLifeStatus();
   renderStocks();
   syncTradeButtons();
-  syncNextTurnButton();
   startGameClockFromInit(false);
 }
 
@@ -1314,7 +1316,6 @@ function applyServerMarketState(m) {
   renderJobScheduleUi();
   updatePremarketChartOverlay();
   syncTradeButtons();
-  syncNextTurnButton();
   renderAssetSummary();
   } catch (e) {
     console.warn("applyServerMarketState", e);
@@ -1554,7 +1555,6 @@ function closeMarketOnline() {
   addNewsItem("장 마감 — 오늘의 거래가 종료되었습니다.", "close", "", {
     global: true,
   });
-  syncNextTurnButton();
 }
 
 function openNextTradingDayOnline() {
@@ -1581,7 +1581,6 @@ function openNextTradingDayOnline() {
     "",
     { global: true }
   );
-  syncNextTurnButton();
   syncTradeButtons();
 }
 
@@ -1642,7 +1641,6 @@ async function maybeAdvanceOnlineMarketAsLeader() {
         refreshDetailChart();
         updateDetailPriceLine();
         renderAssetSummary();
-        syncNextTurnButton();
         reflowGameScreenUi();
         return;
       }
@@ -1668,7 +1666,6 @@ async function maybeAdvanceOnlineMarketAsLeader() {
     refreshDetailChart();
     updateDetailPriceLine();
     renderAssetSummary();
-    syncNextTurnButton();
     syncTradeButtons();
     processPendingOrdersMatch();
     reflowGameScreenUi();
@@ -1688,6 +1685,8 @@ function ensureOnlineMarketSync(reason = "") {
     );
     subscribeMarketRealtime();
     subscribeSocialTradeRealtime();
+    subscribeMultiplayerRealtime();
+    setMultiplyOfflineHints();
     clearMarketClientTick();
     marketClientTickId = setInterval(() => {
       maybeAdvanceOnlineMarketAsLeader().catch((e) =>
@@ -1732,7 +1731,6 @@ function subscribeMarketRealtime() {
           refreshDetailChart();
           renderStockListMain();
           updateDetailPriceLine();
-          syncNextTurnButton();
           syncTradeButtons();
           updatePremarketChartOverlay();
           updateDetailTradeLivePreview();
@@ -2311,25 +2309,8 @@ function shouldAdvanceMarketClock() {
   return isPreMarketWindow() || isRegularSession() || isAfterHoursSession();
 }
 
-/** 다음 턴(1년) — 정규·시간외 장이 아닐 때만 */
-function canAdvanceYearTurn() {
-  return !isRegularSession() && !isAfterHoursSession();
-}
-
 function isTradingSession() {
   return isTradingWindowActive();
-}
-
-/** 다음 턴(1년)은 일일 장 마감 후에만 가능 — 장중·장전 클릭 방지 */
-function syncNextTurnButton() {
-  const btn = document.getElementById("btnNextTurn");
-  if (!btn) return;
-  const canAdvance = canAdvanceYearTurn();
-  btn.disabled = !canAdvance;
-  btn.setAttribute("aria-disabled", canAdvance ? "false" : "true");
-  btn.title = canAdvance
-    ? ""
-    : "장 마감 후에만 다음 턴(1년)을 진행할 수 있습니다.";
 }
 
 function resetDailyNewsState() {
@@ -2806,6 +2787,268 @@ function stockEvalProfit() {
   return { eval: ev, cost, pl: ev - cost };
 }
 
+/** RPC `execute_sell_by_name` 와 동일한 실현손익(매도 직전 상태 기준) */
+function computeRealizedProfitBeforeSell(stockId, qty) {
+  const stock = getStockById(stockId);
+  const sh = Math.max(0, Math.floor(Number(game.holdings[stockId] ?? 0)));
+  const cb = Math.max(0, Math.floor(Number(game.costBasis[stockId] ?? 0)));
+  const q = Math.max(0, Math.floor(Number(qty)));
+  if (!stock || q <= 0 || sh < q) return 0;
+  const px = Number(stock.price);
+  if (!Number.isFinite(px) || px <= 0) return 0;
+  const gain = Math.round(px * q * (1 - TRADE_FEE_RATE));
+  let newCb;
+  if (sh === q) {
+    newCb = 0;
+  } else {
+    newCb = Math.round(cb * ((sh - q) / sh));
+  }
+  return gain - (cb - newCb);
+}
+
+async function insertTradeLogRow({ side, symbol, qty, price, profit }) {
+  if (!sb || !onlineMode || !loginDisplayName) return;
+  const display_name =
+    (playerProfile.name && String(playerProfile.name).trim()) || loginDisplayName;
+  const row = {
+    login_name: loginDisplayName,
+    display_name,
+    side,
+    symbol,
+    qty: Math.max(1, Math.floor(Number(qty))),
+    price: Math.max(0, Math.floor(Number(price))),
+    profit:
+      profit === null || profit === undefined
+        ? null
+        : Math.round(Number(profit)),
+  };
+  const { error } = await sb.from(TBL_TRADE_LOGS).insert(row);
+  if (error) console.warn("insertTradeLogRow", error);
+}
+
+function tradeFeedItemClass(row) {
+  if (row.side === "buy") return "mp-feed-item mp-feed-buy";
+  const p = row.profit != null ? Number(row.profit) : 0;
+  if (p > 0) return "mp-feed-item mp-feed-win";
+  if (p < 0) return "mp-feed-item mp-feed-loss";
+  return "mp-feed-item mp-feed-flat";
+}
+
+function tradeFeedLineHtml(row) {
+  const name = escapeHtml(String(row.display_name || row.login_name || ""));
+  const spec = stockSpecById(row.symbol);
+  const sn = escapeHtml(spec ? spec.name : String(row.symbol));
+  const price = Math.max(0, Math.floor(Number(row.price)));
+  const qty = Math.max(0, Math.floor(Number(row.qty)));
+  const priceStr = price.toLocaleString("ko-KR");
+  if (row.side === "buy") {
+    return `🔥 [뇌동매매] ${name}님이 ${sn}을(를) ${priceStr}원에 ${qty}주 매수했습니다.`;
+  }
+  const p = row.profit != null ? Math.round(Number(row.profit)) : 0;
+  const absStr = Math.abs(p).toLocaleString("ko-KR");
+  if (p > 0) {
+    return `💰 [기만자] ${name}님이 ${sn}에서 +${absStr}원을 벌고 익절했습니다!`;
+  }
+  if (p < 0) {
+    return `💀 [피눈물] ${name}님이 ${sn}에서 -${absStr}원을 잃고 빤스런했습니다...`;
+  }
+  return `📌 [본전] ${name}님이 ${sn} ${qty}주를 본전에 매도했습니다.`;
+}
+
+function createTradeFeedLi(row) {
+  const li = document.createElement("li");
+  li.className = tradeFeedItemClass(row);
+  if (row.id != null) li.dataset.logId = String(row.id);
+  li.innerHTML = tradeFeedLineHtml(row);
+  return li;
+}
+
+function prependMultiplyTradeFeedRow(row) {
+  const ul = document.getElementById("mpTradeFeed");
+  if (!ul || row == null) return;
+  const id = row.id != null ? String(row.id) : null;
+  if (id && mpTradeLogIdsSeen.has(id)) return;
+  if (id) mpTradeLogIdsSeen.add(id);
+  if (mpTradeLogIdsSeen.size > 400) {
+    mpTradeLogIdsSeen = new Set([...mpTradeLogIdsSeen].slice(-200));
+  }
+  ul.insertBefore(createTradeFeedLi(row), ul.firstChild);
+  while (ul.children.length > 60) {
+    const last = ul.lastChild;
+    const lid = last?.dataset?.logId;
+    if (lid) mpTradeLogIdsSeen.delete(lid);
+    last.remove();
+  }
+}
+
+async function fetchMultiplyTradeLogsInitial() {
+  if (!sb || !onlineMode) return;
+  const ul = document.getElementById("mpTradeFeed");
+  if (!ul) return;
+  const { data, error } = await sb
+    .from(TBL_TRADE_LOGS)
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(50);
+  if (error) {
+    console.warn("fetchMultiplyTradeLogsInitial", error);
+    return;
+  }
+  mpTradeLogIdsSeen = new Set();
+  ul.innerHTML = "";
+  (data || []).forEach((row) => {
+    if (row.id != null) mpTradeLogIdsSeen.add(String(row.id));
+    ul.appendChild(createTradeFeedLi(row));
+  });
+}
+
+function displayNameFromProfile(profile, loginName) {
+  if (profile && typeof profile === "object" && profile.name) {
+    const n = String(profile.name).trim();
+    if (n) return n;
+  }
+  return loginName || "—";
+}
+
+async function refreshMultiplyLeaderboard() {
+  const ol = document.getElementById("mpLeaderboard");
+  const hintOff = document.getElementById("mpRankOfflineHint");
+  if (!ol) return;
+  if (!sb || !onlineMode) {
+    ol.innerHTML = "";
+    if (hintOff) hintOff.hidden = false;
+    return;
+  }
+  if (hintOff) hintOff.hidden = true;
+  const { data: userRows, error: uErr } = await sb
+    .from(TBL_USERS)
+    .select("login_name, cash, profile");
+  const { data: portRows, error: pErr } = await sb
+    .from(TBL_PORTFOLIOS)
+    .select("login_name, symbol, shares, avg_cost");
+  if (uErr || pErr) {
+    console.warn("refreshMultiplyLeaderboard", uErr || pErr);
+    return;
+  }
+  const byName = new Map();
+  (userRows || []).forEach((u) => {
+    byName.set(u.login_name, {
+      login_name: u.login_name,
+      cash: Math.max(0, Math.floor(Number(u.cash) || 0)),
+      profile: u.profile,
+      stockVal: 0,
+    });
+  });
+  (portRows || []).forEach((p) => {
+    const row = byName.get(p.login_name);
+    if (!row) return;
+    const st = getStockById(p.symbol);
+    const sh = Math.max(0, Math.floor(Number(p.shares) || 0));
+    if (!st || sh <= 0) return;
+    row.stockVal += sh * st.price;
+  });
+  const list = [...byName.values()].map((r) => ({
+    ...r,
+    total: r.cash + r.stockVal,
+    label: displayNameFromProfile(r.profile, r.login_name),
+  }));
+  list.sort((a, b) => b.total - a.total);
+  ol.innerHTML = "";
+  const n = list.length;
+  list.forEach((r, idx) => {
+    const rank = idx + 1;
+    const li = document.createElement("li");
+    li.className = "mp-leader-row";
+    if (n > 1 && rank === 1) li.classList.add("mp-leader-row--first");
+    if (n > 1 && rank === n) li.classList.add("mp-leader-row--last");
+    const rankEl = document.createElement("span");
+    rankEl.className = "mp-leader-rank";
+    rankEl.textContent = `${rank}.`;
+    const nameEl = document.createElement("span");
+    nameEl.className = "mp-leader-name";
+    let prefix = "";
+    let suffix = "";
+    if (n > 1 && rank === 1) prefix = "👑 ";
+    if (n > 1 && rank === n) suffix = " 🪫";
+    nameEl.textContent = `${prefix}${r.label}${suffix}`;
+    const valEl = document.createElement("span");
+    valEl.className = "mp-leader-value";
+    valEl.textContent = formatWon(Math.round(r.total));
+    li.appendChild(rankEl);
+    li.appendChild(nameEl);
+    li.appendChild(valEl);
+    ol.appendChild(li);
+  });
+}
+
+function scheduleMultiplyLeaderboardRefresh() {
+  if (mpLeaderboardDebounceId) clearTimeout(mpLeaderboardDebounceId);
+  mpLeaderboardDebounceId = setTimeout(() => {
+    mpLeaderboardDebounceId = null;
+    refreshMultiplyLeaderboard();
+  }, 320);
+}
+
+function setMultiplyOfflineHints() {
+  const feedHint = document.getElementById("mpFeedOfflineHint");
+  const rankHint = document.getElementById("mpRankOfflineHint");
+  const show = !onlineMode || !sb;
+  if (feedHint) feedHint.hidden = !show;
+  if (rankHint) rankHint.hidden = !show;
+}
+
+function subscribeMultiplayerRealtime() {
+  if (!sb || !onlineMode) return;
+  if (multiplayerChannel) {
+    sb.removeChannel(multiplayerChannel);
+    multiplayerChannel = null;
+  }
+  multiplayerChannel = sb
+    .channel("multiply_live")
+    .on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: TBL_TRADE_LOGS,
+      },
+      (payload) => {
+        try {
+          const row = payload.new;
+          if (row) prependMultiplyTradeFeedRow(row);
+        } catch (e) {
+          console.warn("trade_logs realtime", e);
+        }
+      }
+    )
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: TBL_USERS,
+      },
+      () => scheduleMultiplyLeaderboardRefresh()
+    )
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: TBL_PORTFOLIOS,
+      },
+      () => scheduleMultiplyLeaderboardRefresh()
+    )
+    .subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        fetchMultiplyTradeLogsInitial();
+        scheduleMultiplyLeaderboardRefresh();
+      } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+        console.warn("multiply channel", status);
+      }
+    });
+}
+
 async function buyStock(stockId, quantityRaw, mode = "shares") {
   if (tutorialGateActive) {
     return { ok: false, reason: "튜토리얼을 먼저 완료해 주세요." };
@@ -2822,6 +3065,7 @@ async function buyStock(stockId, quantityRaw, mode = "shares") {
   }
   const stock = getStockById(stockId);
   if (!stock) return { ok: false, reason: "존재하지 않는 종목입니다." };
+  const execPx = Math.floor(Number(stock.price));
 
   const { data, error } = await sb.rpc("execute_buy_by_name", {
     p_login_name: loginDisplayName,
@@ -2837,6 +3081,13 @@ async function buyStock(stockId, quantityRaw, mode = "shares") {
   game.cash = Number(data.cash);
   await loadUserFromServer();
   schedulePersistUser();
+  await insertTradeLogRow({
+    side: "buy",
+    symbol: stockId,
+    qty: q,
+    price: execPx,
+    profit: null,
+  });
   return { ok: true };
 }
 
@@ -2856,6 +3107,8 @@ async function sellStock(stockId, quantityRaw, mode = "shares") {
   }
   const stock = getStockById(stockId);
   if (!stock) return { ok: false, reason: "존재하지 않는 종목입니다." };
+  const execPx = Math.floor(Number(stock.price));
+  const realizedPl = computeRealizedProfitBeforeSell(stockId, q);
 
   const { data, error } = await sb.rpc("execute_sell_by_name", {
     p_login_name: loginDisplayName,
@@ -2871,6 +3124,13 @@ async function sellStock(stockId, quantityRaw, mode = "shares") {
   game.cash = Number(data.cash);
   await loadUserFromServer();
   schedulePersistUser();
+  await insertTradeLogRow({
+    side: "sell",
+    symbol: stockId,
+    qty: q,
+    price: execPx,
+    profit: realizedPl,
+  });
   return { ok: true };
 }
 
@@ -3864,7 +4124,6 @@ function startGameClockFromInit(loaded) {
     syncTradeButtons();
     if (!loaded) schedulePersistUser();
     else flushPersistUser();
-    syncNextTurnButton();
     reflowGameScreenUi();
     gameClockEverStarted = true;
   } catch (e) {
@@ -4411,7 +4670,6 @@ function onSessionSecondTick() {
     renderStockListMain();
     updateDetailPriceLine();
     renderAssetSummary();
-    syncNextTurnButton();
     syncTradeButtons();
     processPendingOrdersMatch();
     schedulePersistUser();
@@ -4461,7 +4719,6 @@ function onSessionSecondTick() {
     if (gameMinutes >= MARKET_CLOSE_MIN) {
       closeMarket();
     } else {
-      syncNextTurnButton();
     }
     return;
   }
@@ -4489,7 +4746,6 @@ function onSessionSecondTick() {
     if (gameMinutes >= MARKET_CLOSE_MIN) {
       closeMarket();
     } else {
-      syncNextTurnButton();
     }
   }
 }
@@ -4581,7 +4837,6 @@ function closeMarket() {
 
   flushPersistUser();
   scheduleNextTradingDay();
-  syncNextTurnButton();
 }
 
 function dismissMessage() {
@@ -4725,6 +4980,7 @@ function initTabs() {
     market: document.getElementById("tab-market"),
     news: document.getElementById("tab-news"),
     portfolio: document.getElementById("tab-portfolio"),
+    arena: document.getElementById("tab-arena"),
     life: document.getElementById("tab-life"),
   };
 
@@ -4744,6 +5000,13 @@ function initTabs() {
       b.setAttribute("aria-selected", sel ? "true" : "false");
     });
     if (tab === "life") renderJobScheduleUi();
+    if (tab === "arena") {
+      setMultiplyOfflineHints();
+      scheduleMultiplyLeaderboardRefresh();
+      if (onlineMode && sb) {
+        fetchMultiplyTradeLogsInitial();
+      }
+    }
   }
 
   buttons.forEach((btn) => {
@@ -4761,30 +5024,6 @@ function tickStockPrices() {
   renderStockListMain();
   updateDetailPriceLine();
   renderAssetSummary();
-}
-
-function onNextTurn() {
-  if (isTradingSession()) {
-    setMessage(
-      "장이 열려 있는 동안에는 다음 턴(1년)을 진행할 수 없습니다.",
-      "err"
-    );
-    return;
-  }
-  if (!canAdvanceYearTurn()) {
-    setMessage("다음 턴(1년)은 장 마감 후에만 진행할 수 있습니다.", "err");
-    return;
-  }
-  game.age += 1;
-  if (!onlineMode) {
-    tickStockPrices();
-    setMessage(`${game.age}세가 되었습니다. 시장 가격이 변동했습니다.`);
-  } else {
-    setMessage(`${game.age}세가 되었습니다. 시장 가격은 서버에서 공유됩니다.`);
-  }
-  renderAssetSummary();
-  renderStocks();
-  schedulePersistUser();
 }
 
 function initNewGame() {
@@ -4848,6 +5087,8 @@ async function runGameBootstrap() {
   await loadUserFromServer();
   subscribeMarketRealtime();
   subscribeSocialTradeRealtime();
+  subscribeMultiplayerRealtime();
+  setMultiplyOfflineHints();
 
   renderDateTimeLine();
   renderCalendarUI();
@@ -4861,7 +5102,6 @@ async function runGameBootstrap() {
   bindLifeUi();
   bindCharacterSetup();
   bindTutorialUiOnce();
-  document.getElementById("btnNextTurn").addEventListener("click", onNextTurn);
   const btnReset = document.getElementById("btnResetData");
   if (btnReset) btnReset.addEventListener("click", () => resetAllLocalDataAndReload());
 
