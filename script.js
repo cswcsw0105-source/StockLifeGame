@@ -36,6 +36,9 @@ const EMERGENCY_JOB_CASH_THRESHOLD = 1_000_000;
 const EMERGENCY_LOCK_MS = 15 * 60 * 1000;
 /** 매매 수량은 DB(bigint 등)와 맞추기 위해 항상 정수(주)만 사용 */
 
+/** 동전주 메타 — 상장 폐지 방지 최저가(원) */
+const MIN_STOCK_PRICE = 30;
+
 /** 현실 1초 = 게임 내 1분 */
 const GAME_MINUTES_PER_REAL_SEC = 1;
 /** 한 봉 = 게임 시간 10분 = 현실 10초 (매초 시세 변동, 10초마다 봉 확정) */
@@ -45,6 +48,8 @@ const DIVIDEND_EVERY_CANDLES = 4;
 
 const MARKET_OPEN_MIN = 9 * 60;
 const MARKET_CLOSE_MIN = 15 * 60 + 30;
+/** 게임 캘린더 하루(분) — 캔들 X축 순서·기간 필터 (실시간 시계와 무관) */
+const GAME_MINUTES_PER_DAY = 24 * 60;
 /** 장 시작 전 대기(프리마켓) — 08:00~09:00, 매매 불가 · 시계만 진행 */
 const PREMARKET_START_MIN = 8 * 60;
 /** 08:00~08:50(게임분 480~529): 프리마켓 뉴스 폭격 구간 */
@@ -85,9 +90,13 @@ let lastDetailTradeAction = "buy";
 /** 급전 알바 잠금 해제까지 1초 폴링 */
 let tradeLockPollIntervalId = null;
 
-/** 신규 게임 시 시초가: 10,000 ~ 50,000원 균등 랜덤(정수) */
+/** 신규·초기화 시 시초가: 100 ~ 200원 균등 랜덤 정수(동전주) */
 function randomInitialPrice() {
-  return Math.floor(10_000 + Math.random() * 40_001);
+  return Math.floor(100 + Math.random() * 101);
+}
+
+function clampStockPrice(p) {
+  return Math.max(MIN_STOCK_PRICE, Math.floor(Number(p)));
 }
 
 const STOCK_SPECS = [
@@ -96,7 +105,6 @@ const STOCK_SPECS = [
     name: "재빈디자인",
     desc: "크리에이티브 디자인 스튜디오.",
     price: 10_000,
-    volatility: "high",
     chartColor: "#ff6b6b",
   },
   {
@@ -104,7 +112,6 @@ const STOCK_SPECS = [
     name: "승윤윙즈",
     desc: "모빌리티 테크 기업.",
     price: 10_000,
-    volatility: "high",
     chartColor: "#f472b6",
   },
   {
@@ -112,7 +119,6 @@ const STOCK_SPECS = [
     name: "민준스테이",
     desc: "케어 서비스 플랫폼.",
     price: 10_000,
-    volatility: "medium",
     chartColor: "#38bdf8",
   },
   {
@@ -120,7 +126,6 @@ const STOCK_SPECS = [
     name: "범서랩",
     desc: "기능성 뷰티 브랜드.",
     price: 10_000,
-    volatility: "medium",
     chartColor: "#fb7185",
   },
   {
@@ -128,7 +133,6 @@ const STOCK_SPECS = [
     name: "석영기어",
     desc: "정밀 시스템 제조사.",
     price: 10_000,
-    volatility: "high",
     chartColor: "#a78bfa",
   },
   {
@@ -136,7 +140,6 @@ const STOCK_SPECS = [
     name: "진우펀드",
     desc: "자산 운용 및 투자사.",
     price: 10_000,
-    volatility: "low",
     chartColor: "#34d399",
   },
   {
@@ -144,7 +147,6 @@ const STOCK_SPECS = [
     name: "요한룩",
     desc: "패션 큐레이션 플랫폼.",
     price: 10_000,
-    volatility: "medium",
     chartColor: "#fbbf24",
   },
   {
@@ -152,7 +154,6 @@ const STOCK_SPECS = [
     name: "선웅비즈",
     desc: "종합 비즈니스 솔루션 플랫폼.",
     price: 10_000,
-    volatility: "low",
     chartColor: "#22d3ee",
   },
 ];
@@ -257,7 +258,6 @@ let headlineImpulse = 0;
 let sessionCandleCount = 0;
 let dividendCandleCounter = 0;
 
-let isPaused = false;
 let isMarketClosed = false;
 /** 장 마감 직후 ~ 다음날 08:00 롤 전까지(짧은 대기 + 시계 정지) */
 let awaitingDayRoll = false;
@@ -310,9 +310,41 @@ let chainStepByStock = emptyChainState();
 
 const stocks = STOCK_SPECS.map((spec) => ({
   ...spec,
-  volatilityMod: 1,
-  priceBias: 0,
 }));
+
+/** 종목별 '진짜 뉴스' 후 급등·급락 틱 잔여 횟수(다음 시세 틱에서 소모) */
+let newsSpikeTicksLeft = emptyChainState();
+/** 종목별 급등(1) / 급락(-1) */
+let newsSpikeDirection = Object.fromEntries(
+  STOCK_SPECS.map((s) => [s.id, 1])
+);
+
+function resetNewsSpikeState() {
+  newsSpikeTicksLeft = emptyChainState();
+  STOCK_SPECS.forEach((s) => {
+    newsSpikeDirection[s.id] = 1;
+  });
+}
+
+/** 체이닝·일정 등: 페이로드 impact 부호로 방향만 쓰고, 3~5틱 급등·급락 스케줄 */
+function scheduleNewsSpikeForStock(stockId, directionSign) {
+  if (!getStockById(stockId)) return;
+  const ticks = 3 + Math.floor(Math.random() * 3);
+  newsSpikeTicksLeft[stockId] = Math.max(
+    newsSpikeTicksLeft[stockId] || 0,
+    ticks
+  );
+  newsSpikeDirection[stockId] = directionSign >= 0 ? 1 : -1;
+}
+
+function scheduleNewsSpikeFromImpacts(impacts) {
+  if (!impacts || typeof impacts !== "object") return;
+  Object.entries(impacts).forEach(([id, raw]) => {
+    const imp = Number(raw);
+    if (!imp || !Number.isFinite(imp)) return;
+    scheduleNewsSpikeForStock(id, imp > 0 ? 1 : -1);
+  });
+}
 
 /** 종목별 10분봉 시퀀스 (날짜 누적, 장 마감 후에도 유지) */
 const candleHistory = Object.fromEntries(
@@ -320,9 +352,13 @@ const candleHistory = Object.fromEntries(
 );
 
 /** 상세 화면 캔들/거래량 차트만 사용 */
-const apexDetail = { candle: null, vol: null, stockId: null };
+const apexDetail = { candle: null, vol: null, stockId: null, chartRange: "all" };
 
 let selectedStockId = null;
+/** 상세 차트 기간: all | d2 | d5 | w1 | m1 */
+let detailChartRange = "all";
+/** 종목 상세 현재가 표시 직전 가격(틱 애니메이션) */
+let detailLastShownPrice = null;
 
 /** 관심 종목 티커 — 뉴스 가중치에 사용 */
 let watchlistIds = [];
@@ -441,15 +477,6 @@ function finishRollToPreMarketDay() {
   renderAssetSummary();
   renderLifeStatus();
 
-  const pauseBtn = document.getElementById("btnPause");
-  if (pauseBtn) {
-    pauseBtn.disabled = false;
-    pauseBtn.querySelector(".mts-pause-label").textContent = "멈춤";
-    pauseBtn.classList.remove("paused", "market-ended");
-    pauseBtn.setAttribute("aria-pressed", "false");
-    pauseBtn.setAttribute("aria-label", "시간 멈춤");
-  }
-
   const { month, day } = getCalendarParts(gameDayIndex);
   addNewsItem(
     `${month}월 ${day}일 08:00 — 장 시작 전 · 프리마켓 뉴스를 확인하세요 (09:00 시초가 갭)`,
@@ -513,11 +540,9 @@ function bindTutorialUiOnce() {
 
 /** 로그인 직후·세션 복구 후: 설정 → 튜토리얼 → 게임 순으로 분기 */
 function routeOnboardingScreens() {
-  const pauseBtn = document.getElementById("btnPause");
   populateSetupForm();
   if (!playerProfile.setupComplete) {
     showScreen("screen-setup");
-    if (pauseBtn) pauseBtn.disabled = true;
     renderAssetSummary();
     renderLifeStatus();
     renderStocks();
@@ -528,7 +553,6 @@ function routeOnboardingScreens() {
   }
   if (!isTutorialDone()) {
     showScreen("screen-tutorial");
-    if (pauseBtn) pauseBtn.disabled = true;
     renderAssetSummary();
     renderLifeStatus();
     renderStocks();
@@ -538,18 +562,6 @@ function routeOnboardingScreens() {
     return;
   }
   showScreen("screen-game");
-  if (pauseBtn) {
-    if (awaitingDayRoll) {
-      pauseBtn.disabled = true;
-      const lab = pauseBtn.querySelector(".mts-pause-label");
-      if (lab) lab.textContent = "종료";
-      pauseBtn.classList.add("market-ended");
-    } else {
-      pauseBtn.disabled = false;
-      pauseBtn.classList.remove("market-ended");
-      updatePauseButton();
-    }
-  }
   renderAssetSummary();
   renderLifeStatus();
   renderStocks();
@@ -892,12 +904,24 @@ function applyServerMarketState(m) {
       : gm0 < MARKET_OPEN_MIN
         ? false
         : true;
-  isPaused = false;
   headlineImpulse = m.headlineImpulse ?? 0;
   nextCalendarEventId = m.nextCalendarEventId ?? 1;
   scheduledEvents = Array.isArray(m.scheduledEvents) ? m.scheduledEvents : [];
   newsCountByStock = { ...emptyChainState(), ...m.newsCountByStock };
   chainStepByStock = { ...emptyChainState(), ...m.chainStepByStock };
+  if (m.newsSpikeTicksLeft && typeof m.newsSpikeTicksLeft === "object") {
+    STOCK_SPECS.forEach((spec) => {
+      const v = m.newsSpikeTicksLeft[spec.id];
+      newsSpikeTicksLeft[spec.id] =
+        typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0;
+    });
+  }
+  if (m.newsSpikeDirection && typeof m.newsSpikeDirection === "object") {
+    STOCK_SPECS.forEach((spec) => {
+      const v = m.newsSpikeDirection[spec.id];
+      newsSpikeDirection[spec.id] = v === -1 ? -1 : 1;
+    });
+  }
   dividendCandleCounter = m.dividendCandleCounter ?? 0;
   sessionCandleCount = m.sessionCandleCount ?? 0;
   tickInCandle = m.tickInCandle ?? 0;
@@ -906,15 +930,13 @@ function applyServerMarketState(m) {
   (m.stocks || []).forEach((row) => {
     const s = getStockById(row.id);
     if (!s) return;
-    s.price = Math.round(row.price);
-    s.volatilityMod = row.volatilityMod ?? 1;
-    s.priceBias = row.priceBias ?? 0;
+    s.price = clampStockPrice(row.price);
   });
 
   STOCK_SPECS.forEach((spec) => {
     const id = spec.id;
     candleHistory[id] = Array.isArray(m.candleHistory?.[id])
-      ? m.candleHistory[id].map((r) => ({ ...r }))
+      ? m.candleHistory[id].map((r) => normalizeCandleRow({ ...r }))
       : [];
   });
 
@@ -1002,6 +1024,8 @@ function serializeMarketState() {
     scheduledEvents: JSON.parse(JSON.stringify(scheduledEvents)),
     newsCountByStock: { ...newsCountByStock },
     chainStepByStock: { ...chainStepByStock },
+    newsSpikeTicksLeft: { ...newsSpikeTicksLeft },
+    newsSpikeDirection: { ...newsSpikeDirection },
     dividendCandleCounter,
     sessionCandleCount,
     tickInCandle,
@@ -1009,8 +1033,6 @@ function serializeMarketState() {
     stocks: stocks.map((s) => ({
       id: s.id,
       price: s.price,
-      volatilityMod: s.volatilityMod,
-      priceBias: s.priceBias,
     })),
     candleHistory: ch,
     sessionOpenPrice: { ...sessionOpenPrice },
@@ -1078,13 +1100,6 @@ function closeMarketOnline() {
   addNewsItem("장 마감 — 오늘의 거래가 종료되었습니다.", "close", "", {
     global: true,
   });
-  const pauseBtn = document.getElementById("btnPause");
-  if (pauseBtn) {
-    pauseBtn.disabled = true;
-    const lab = pauseBtn.querySelector(".mts-pause-label");
-    if (lab) lab.textContent = "종료";
-    pauseBtn.classList.add("market-ended");
-  }
   syncNextTurnButton();
 }
 
@@ -1100,9 +1115,7 @@ function openNextTradingDayOnline() {
   resetDailyNewsState();
   generatePremarketNewsPlan();
   dividendCandleCounter = 0;
-  stocks.forEach((s) => {
-    s.priceBias = 0;
-  });
+  resetNewsSpikeState();
   ensureCalendarHorizon();
   fireDueCalendarEvents();
   maybeApplyMonthlySalary();
@@ -1113,14 +1126,6 @@ function openNextTradingDayOnline() {
     "",
     { global: true }
   );
-  const pauseBtn = document.getElementById("btnPause");
-  if (pauseBtn) {
-    pauseBtn.disabled = false;
-    pauseBtn.querySelector(".mts-pause-label").textContent = "멈춤";
-    pauseBtn.classList.remove("paused", "market-ended");
-    pauseBtn.setAttribute("aria-pressed", "false");
-    pauseBtn.setAttribute("aria-label", "시간 멈춤");
-  }
   syncNextTurnButton();
   syncTradeButtons();
 }
@@ -1674,9 +1679,160 @@ function formatMinuteOfDay(totalMin) {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
 
-/** 누적 일차 + 장내 시각 (X축 라벨) */
+function gameTimeOrdinalFromParts(dayIndex, periodStartMin) {
+  return dayIndex * GAME_MINUTES_PER_DAY + periodStartMin;
+}
+
+/** 게임 캘린더 월/일 → dayIndex (앵커 2000-04-01) */
+function dayIndexFromMonthDay(month, day) {
+  const tgt = new Date(2000, month - 1, day);
+  const a = GAME_ANCHOR_DATE();
+  return Math.round((tgt - a) / 86400000);
+}
+
+/** 기존 저장본 X 문자열에서 dayIndex·periodStartMin 복구 */
+function parseCandleXToGameParts(x) {
+  if (!x || typeof x !== "string") return null;
+  const legacy = x.match(/^D(\d+)·(\d{2}):(\d{2})$/);
+  if (legacy) {
+    return {
+      dayIndex: Number(legacy[1]) - 1,
+      periodStartMin: Number(legacy[2]) * 60 + Number(legacy[3]),
+    };
+  }
+  const md = x.match(/^(\d+)\/(\d+)\s+(\d{1,2}):(\d{2})$/);
+  if (md) {
+    return {
+      dayIndex: dayIndexFromMonthDay(Number(md[1]), Number(md[2])),
+      periodStartMin: Number(md[3]) * 60 + Number(md[4]),
+    };
+  }
+  return null;
+}
+
+function normalizeCandleRow(r) {
+  if (!r || typeof r !== "object") return r;
+  let dayIndex = r.dayIndex;
+  let periodStartMin = r.periodStartMin;
+  if (typeof dayIndex !== "number" || typeof periodStartMin !== "number") {
+    const p = parseCandleXToGameParts(r.x);
+    if (p) {
+      dayIndex = p.dayIndex;
+      periodStartMin = p.periodStartMin;
+    } else {
+      dayIndex = 0;
+      periodStartMin = MARKET_OPEN_MIN;
+    }
+  }
+  const gameTimeOrdinal =
+    typeof r.gameTimeOrdinal === "number"
+      ? r.gameTimeOrdinal
+      : gameTimeOrdinalFromParts(dayIndex, periodStartMin);
+  return {
+    ...r,
+    dayIndex,
+    periodStartMin,
+    gameTimeOrdinal,
+    x: r.x || formatCandleXLabel(dayIndex, periodStartMin),
+    o: Math.floor(Number(r.o)),
+    h: Math.floor(Number(r.h)),
+    l: Math.floor(Number(r.l)),
+    c: Math.floor(Number(r.c)),
+  };
+}
+
+/** 게임 내 날짜·장내 시각 (X축, 실시간 시계와 무관) */
 function formatCandleXLabel(dayIndex, periodStartMin) {
-  return `D${dayIndex + 1}·${formatMinuteOfDay(periodStartMin)}`;
+  const { month, day } = getCalendarParts(dayIndex);
+  return `${month}/${day} ${formatMinuteOfDay(periodStartMin)}`;
+}
+
+function minDayIndexForChartRange(range) {
+  const d = gameDayIndex;
+  switch (range) {
+    case "d2":
+      return Math.max(0, d - 1);
+    case "d5":
+      return Math.max(0, d - 4);
+    case "w1":
+      return Math.max(0, d - 6);
+    case "m1":
+      return Math.max(0, d - 29);
+    default:
+      return 0;
+  }
+}
+
+function filterCandleRowsForChartRange(rows, range) {
+  if (!rows || rows.length === 0) return [];
+  if (range === "all") return rows;
+  const minDay = minDayIndexForChartRange(range);
+  return rows.filter((r) => (r.dayIndex ?? 0) >= minDay);
+}
+
+function getFilteredCandleHistory(stockId) {
+  const raw = candleHistory[stockId] || [];
+  const range = detailChartRange || "all";
+  return filterCandleRowsForChartRange(raw, range);
+}
+
+function getAvgCostForStock(stockId) {
+  const sh = Math.max(0, Math.floor(Number(game.holdings[stockId] ?? 0)));
+  if (sh <= 0) return null;
+  const cb = game.costBasis[stockId] ?? 0;
+  const a = Math.floor(cb / sh);
+  return Number.isFinite(a) && a > 0 ? a : null;
+}
+
+function buildDetailChartAnnotations(stockId) {
+  const avg = getAvgCostForStock(stockId);
+  if (avg == null) {
+    return { yaxis: [], xaxis: [] };
+  }
+  return {
+    yaxis: [
+      {
+        y: avg,
+        borderColor: "rgba(250, 204, 21, 0.9)",
+        strokeDashArray: 6,
+        label: {
+          text: "평단",
+          style: {
+            color: "#facc15",
+            fontSize: "10px",
+            fontWeight: 600,
+          },
+          position: "right",
+          offsetX: -4,
+        },
+      },
+    ],
+  };
+}
+
+function syncDetailChartRangeButtons() {
+  document.querySelectorAll("[data-chart-range]").forEach((b) => {
+    const r = b.getAttribute("data-chart-range");
+    b.classList.toggle("is-active", r === detailChartRange);
+  });
+}
+
+function bindDetailChartRangeUiOnce() {
+  const bar = document.getElementById("detailChartRangeBar");
+  if (!bar || bar.dataset.bound === "1") return;
+  bar.dataset.bound = "1";
+  bar.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-chart-range]");
+    if (!btn) return;
+    const r = btn.getAttribute("data-chart-range");
+    if (!r) return;
+    detailChartRange = r;
+    apexDetail.chartRange = r;
+    syncDetailChartRangeButtons();
+    if (selectedStockId && apexDetail.candle) {
+      refreshDetailChart();
+    }
+  });
 }
 
 function getCalendarParts(dayIndex) {
@@ -1707,7 +1863,7 @@ function isPreMarketWindow() {
 }
 
 function shouldAdvanceMarketClock() {
-  if (isPaused || awaitingDayRoll) return false;
+  if (awaitingDayRoll) return false;
   return isPreMarketWindow() || isTradingWindowActive();
 }
 
@@ -1717,7 +1873,7 @@ function canAdvanceYearTurn() {
 }
 
 function isTradingSession() {
-  return !isPaused && isTradingWindowActive();
+  return isTradingWindowActive();
 }
 
 /** 다음 턴(1년)은 일일 장 마감 후에만 가능 — 장중·장전 클릭 방지 */
@@ -1806,10 +1962,14 @@ function releasePremarketNewsForMinute(minute) {
   if (!batch || batch.length === 0) return;
   batch.forEach((ev) => {
     const type = ev.positive ? "premarket-pos" : "premarket-neg";
+    const asRumor = rollIsRumor();
     addNewsItem(buildPremarketHeadline(ev.stockId, ev.positive), type, "", {
       stockId: ev.stockId,
-      is_rumor: rollIsRumor(),
+      is_rumor: asRumor,
     });
+    if (!asRumor) {
+      scheduleNewsSpikeForStock(ev.stockId, ev.positive ? 1 : -1);
+    }
   });
 }
 
@@ -1847,7 +2007,7 @@ function applyOpeningGapFromPremarket() {
     const s = getStockById(spec.id);
     if (!s) return;
     const mult = 1 + net * GAP_PCT_PER_NET_IMPACT;
-    s.price = Math.round(Math.max(1_000, s.price * mult));
+    s.price = clampStockPrice(s.price * mult);
     summaryBits.push(`${spec.id} ${net > 0 ? "+" : ""}${net}`);
   });
 
@@ -1876,17 +2036,20 @@ function applyOpeningGapFromPremarket() {
   updatePremarketChartOverlay();
 }
 
-function initHoldings(options = {}) {
-  const preserveBias = options.preserveBias === true;
+function initHoldings() {
   stocks.forEach((s) => {
     if (game.holdings[s.id] === undefined) game.holdings[s.id] = 0;
     if (game.costBasis[s.id] === undefined) game.costBasis[s.id] = 0;
-    if (!preserveBias) s.priceBias = 0;
   });
 }
 
 function formatWon(n) {
   return `₩${Math.round(n).toLocaleString("ko-KR")}`;
+}
+
+/** 호가·종목 시세 표시용 — 항상 정수(바닥) */
+function formatStockWon(n) {
+  return `₩${Math.floor(Number(n)).toLocaleString("ko-KR")}`;
 }
 
 function getStockById(id) {
@@ -1930,20 +2093,20 @@ function pseudo01(seed) {
 function buildOrderBookLevels(stockId) {
   const s = getStockById(stockId);
   if (!s) return { asks: [], bids: [], tick: 1 };
-  const p = s.price;
-  const tick = Math.max(1, Math.round(p * 0.0008));
+  const p = Math.floor(s.price);
+  const tick = Math.max(1, Math.floor(p * 0.02));
   const asks = [];
   const bids = [];
   const base = gameDayIndex * 10000 + stockId.charCodeAt(0) * 97;
   for (let i = 5; i >= 1; i -= 1) {
-    const price = p + i * tick;
+    const price = Math.floor(p + i * tick);
     const vol = Math.round(
       800 + pseudo01(base + i * 13) * 42000 * (0.3 + i * 0.14)
     );
     asks.push({ price, vol });
   }
   for (let i = 1; i <= 5; i += 1) {
-    const price = Math.max(1000, p - i * tick);
+    const price = Math.max(MIN_STOCK_PRICE, Math.floor(p - i * tick));
     const vol = Math.round(
       800 + pseudo01(base + 50 + i * 17) * 42000 * (0.3 + (6 - i) * 0.14)
     );
@@ -1988,7 +2151,7 @@ function updateOrderBookAndStrength(stockId) {
     const w = Math.round((vol / maxVol) * 100);
     return `<div class="ob-row ob-row--${side}">
       <span class="ob-tag">${label}</span>
-      <span class="ob-price ${side === "ask" ? "chg-up" : "chg-down"}">${formatWon(price)}</span>
+      <span class="ob-price ${side === "ask" ? "chg-up" : "chg-down"}">${formatStockWon(price)}</span>
       <span class="ob-vol">${vol.toLocaleString("ko-KR")}</span>
       <span class="ob-vol-bar" aria-hidden="true"><i style="width:${w}%"></i></span>
     </div>`;
@@ -1998,7 +2161,7 @@ function updateOrderBookAndStrength(stockId) {
   asks.forEach((a, idx) => {
     html += rowHtml(`매도${5 - idx}`, a.price, a.vol, "ask");
   });
-  html += `<div class="ob-mid"><span>현재가</span><strong>${formatWon(s.price)}</strong></div>`;
+  html += `<div class="ob-mid"><span>현재가</span><strong>${formatStockWon(s.price)}</strong></div>`;
   bids.forEach((b, idx) => {
     html += rowHtml(`매수${idx + 1}`, b.price, b.vol, "bid");
   });
@@ -2151,66 +2314,35 @@ async function sellStock(stockId, quantityRaw, mode = "shares") {
   return { ok: true };
 }
 
-function decayVolatilityMods() {
-  stocks.forEach((s) => {
-    const m = s.volatilityMod;
-    s.volatilityMod = Math.max(1, 1 + (m - 1) * 0.966);
-  });
-}
-
-function returnForStock(s, marketFactor, idio) {
-  const vm = s.volatilityMod;
-  const headlineBlend = 0.82 + 0.18 * Math.min(vm, 2.2);
-  const noiseBlend = 0.72 + 0.28 * Math.min(vm, 2.2);
-  const biasTerm = s.priceBias * 0.022;
-
-  if (s.volatility === "high") {
-    return (
-      0.1 * marketFactor +
-      2.15 * headlineImpulse * headlineBlend +
-      0.0062 * idio * noiseBlend +
-      biasTerm
-    );
-  }
-  if (s.volatility === "medium") {
-    return (
-      0.48 * marketFactor +
-      0.52 * headlineImpulse * headlineBlend +
-      0.002 * idio * noiseBlend +
-      biasTerm
-    );
-  }
-  return (
-    0.975 * marketFactor +
-    0.055 * headlineImpulse * headlineBlend +
-    0.00042 * idio * noiseBlend +
-    biasTerm
-  );
-}
-
+/**
+ * 평상시: 틱당 -2~+2원 횡보. 진짜 뉴스(스파이크) 구간: 틱당 대폭 상승·하락(원 단위).
+ */
 function oneMicroPriceStep() {
-  const marketFactor = 0.00011 * gaussian() + 0.000032;
-  if (Math.random() < 0.028) {
-    const dir = Math.random() < 0.5 ? -1 : 1;
-    headlineImpulse += dir * (0.0035 + Math.random() * 0.016);
-  }
-  headlineImpulse *= 0.935;
-
   stocks.forEach((s) => {
-    const idio = gaussian();
-    const r = returnForStock(s, marketFactor, idio);
-    s.price = Math.round(Math.max(1_000, s.price * (1 + r)));
+    const id = s.id;
+    let delta = 0;
+    const spikeLeft = newsSpikeTicksLeft[id] ?? 0;
+    if (spikeLeft > 0) {
+      newsSpikeTicksLeft[id] = spikeLeft - 1;
+      const up = (newsSpikeDirection[id] ?? 1) >= 0;
+      if (up) {
+        delta = 20 + Math.floor(Math.random() * 31);
+      } else {
+        delta = -(20 + Math.floor(Math.random() * 21));
+      }
+    } else {
+      delta = -2 + Math.floor(Math.random() * 5);
+    }
+    s.price = clampStockPrice(s.price + delta);
   });
 }
 
 function payDividends() {
   let total = 0;
   stocks.forEach((s) => {
-    if (s.volatility !== "medium" && s.volatility !== "low") return;
     const q = game.holdings[s.id] ?? 0;
     if (q <= 0) return;
-    const rate = s.volatility === "medium" ? 0.00085 : 0.0005;
-    total += q * s.price * rate;
+    total += q * Math.max(1, Math.floor(s.price * 0.00085));
   });
   if (total <= 0) return;
 
@@ -2233,14 +2365,17 @@ function pushCandleRow(
   close,
   volume
 ) {
-  const row = {
+  const row = normalizeCandleRow({
+    dayIndex: candleDayIndex,
+    periodStartMin,
+    gameTimeOrdinal: gameTimeOrdinalFromParts(candleDayIndex, periodStartMin),
     x: formatCandleXLabel(candleDayIndex, periodStartMin),
-    o: Math.round(open),
-    h: Math.round(high),
-    l: Math.round(low),
-    c: Math.round(close),
+    o: Math.floor(open),
+    h: Math.floor(high),
+    l: Math.floor(low),
+    c: Math.floor(close),
     v: Math.round(volume),
-  };
+  });
   candleHistory[stockId].push(row);
   while (candleHistory[stockId].length > MAX_CANDLES_PER_STOCK) {
     candleHistory[stockId].shift();
@@ -2261,7 +2396,6 @@ function beginCandlePeriodIfNeeded() {
 
 /** 봉 확정: 게임 시간 10분(현실 10초)마다 또는 장 마감 시 미완성 봉 처리 */
 function sealCurrentCandleAndReset() {
-  decayVolatilityMods();
   const periodStart = candlePeriodStartMin;
   stocks.forEach((s) => {
     const { o, h, l } = candleOhlcBuffer[s.id];
@@ -2285,7 +2419,6 @@ function sealCurrentCandleAndReset() {
       close,
       vol
     );
-    s.priceBias *= 0.88;
   });
 
   sessionCandleCount += 1;
@@ -2344,35 +2477,8 @@ function finalizePriceUI(oldPrices) {
   });
 }
 
-function applyImpactFormula(impacts) {
-  Object.entries(impacts).forEach(([id, impact]) => {
-    const s = getStockById(id);
-    if (!s) return;
-    s.price = Math.round(Math.max(1_000, s.price * (1 + impact)));
-  });
-}
-
-function applyBiasDeltas(biasMap) {
-  if (!biasMap) return;
-  Object.entries(biasMap).forEach(([id, b]) => {
-    const s = getStockById(id);
-    if (!s) return;
-    s.priceBias += b;
-    s.priceBias = Math.max(-0.12, Math.min(0.12, s.priceBias));
-  });
-}
-
 function applyNewsPayload(ev) {
-  const oldPrices = snapshotPrices();
-  applyImpactFormula(ev.impacts || {});
-  applyBiasDeltas(ev.bias);
-  if (ev.volFactor) {
-    Object.keys(ev.impacts || {}).forEach((id) => {
-      const s = getStockById(id);
-      if (s) s.volatilityMod = Math.min(2.85, s.volatilityMod * ev.volFactor);
-    });
-  }
-  finalizePriceUI(oldPrices);
+  scheduleNewsSpikeFromImpacts(ev.impacts || {});
 }
 
 function apexCommonChartOpts(height, chartType) {
@@ -2424,9 +2530,15 @@ function estimatePartialBarVolume(stockId) {
 }
 
 function buildCandleSeriesData(stockId) {
-  const rows = candleHistory[stockId].map((r) => ({
+  const hist = getFilteredCandleHistory(stockId);
+  const rows = hist.map((r) => ({
     x: r.x,
-    y: [r.o, r.h, r.l, r.c],
+    y: [
+      Math.floor(r.o),
+      Math.floor(r.h),
+      Math.floor(r.l),
+      Math.floor(r.c),
+    ],
   }));
   if (
     tickInCandle > 0 &&
@@ -2443,7 +2555,12 @@ function buildCandleSeriesData(stockId) {
       const c = s.price;
       rows.push({
         x: formatCandleXLabel(gameDayIndex, candlePeriodStartMin),
-        y: [Math.round(o), Math.round(h), Math.round(l), Math.round(c)],
+        y: [
+          Math.floor(o),
+          Math.floor(h),
+          Math.floor(l),
+          Math.floor(c),
+        ],
       });
     }
   }
@@ -2451,7 +2568,7 @@ function buildCandleSeriesData(stockId) {
 }
 
 function buildVolumeSeriesData(stockId) {
-  const hist = candleHistory[stockId];
+  const hist = getFilteredCandleHistory(stockId);
   const rows = hist.map((r) => {
     const up = r.c >= r.o;
     return {
@@ -2532,6 +2649,7 @@ function initDetailCharts(stockId) {
         },
       },
     },
+    annotations: buildDetailChartAnnotations(stockId),
     xaxis: {
       type: "category",
       labels: {
@@ -2546,7 +2664,7 @@ function initDetailCharts(stockId) {
     yaxis: {
       labels: {
         style: { colors: "#8b95a8", fontSize: "10px" },
-        formatter: (v) => Math.round(v).toLocaleString("ko-KR"),
+        formatter: (v) => Math.floor(v).toLocaleString("ko-KR"),
       },
     },
   };
@@ -2602,6 +2720,15 @@ function refreshDetailChart() {
     [{ name: "거래량", data: buildVolumeSeriesData(id) }],
     true
   );
+  try {
+    apexDetail.candle.updateOptions(
+      { annotations: buildDetailChartAnnotations(id) },
+      false,
+      true
+    );
+  } catch (e) {
+    console.warn("refreshDetailChart annotations", e);
+  }
   updateOrderBookAndStrength(id);
   updateDetailTradeLivePreview();
 }
@@ -2718,9 +2845,9 @@ function updateDetailTradeLivePreview() {
     const hypNw = netWorth() - oldStockVal + newStockVal - cost;
     const pl = newStockVal - newCb;
     const pct = newCb > 0 ? ((newStockVal - newCb) / newCb) * 100 : 0;
-    if (avgEl) avgEl.textContent = formatWon(Math.round(newAvg));
+    if (avgEl) avgEl.textContent = formatStockWon(Math.floor(newAvg));
     if (plEl) {
-      plEl.textContent = `${pl >= 0 ? "+" : ""}${formatWon(Math.round(pl))} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`;
+      plEl.textContent = `${pl >= 0 ? "+" : ""}${formatStockWon(Math.floor(pl))} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`;
       plEl.className = `detail-preview-pl ${
         pl > 0 ? "value-up" : pl < 0 ? "value-down" : "value-neutral"
       }`;
@@ -2745,10 +2872,10 @@ function updateDetailTradeLivePreview() {
     const hypNw = netWorth() - oldStockVal + newStockVal + g;
     if (avgEl) {
       avgEl.textContent =
-        newSh < 1e-8 ? "—" : formatWon(Math.round(newAvg));
+        newSh < 1e-8 ? "—" : formatStockWon(Math.floor(newAvg));
     }
     if (plEl) {
-      plEl.textContent = `${gain >= 0 ? "+" : ""}${formatWon(Math.round(gain))} (이번 매도)`;
+      plEl.textContent = `${gain >= 0 ? "+" : ""}${formatStockWon(Math.floor(gain))} (이번 매도)`;
       plEl.className = `detail-preview-pl ${
         gain > 0 ? "value-up" : gain < 0 ? "value-down" : "value-neutral"
       }`;
@@ -2856,7 +2983,7 @@ function scheduleAmbientNewsTimer() {
   clearTimeout(newsTimeoutId);
   const delay = 150000 + Math.random() * 130000;
   newsTimeoutId = setTimeout(() => {
-    if (!isPaused && isTradingSession()) {
+    if (isTradingSession()) {
       const sid = pickStockIdForAmbientNews();
       const s = sid ? getStockById(sid) : null;
       if (s) {
@@ -2864,10 +2991,14 @@ function scheduleAmbientNewsTimer() {
           AMBIENT_NEWS_TEMPLATES[
             Math.floor(Math.random() * AMBIENT_NEWS_TEMPLATES.length)
           ];
+        const asRumor = rollIsRumor();
         addNewsItem(tpl(s.name), "ambient", "", {
           stockId: sid,
-          is_rumor: rollIsRumor(),
+          is_rumor: asRumor,
         });
+        if (!asRumor) {
+          scheduleNewsSpikeForStock(sid, Math.random() < 0.52 ? 1 : -1);
+        }
       }
     }
     if (shouldAdvanceMarketClock()) scheduleAmbientNewsTimer();
@@ -2949,25 +3080,11 @@ function bindCharacterSetup() {
     playerProfile.setupComplete = true;
     renderProfileDisplay();
     schedulePersistUser();
-    const pauseBtn = document.getElementById("btnPause");
     if (!isTutorialDone()) {
       showScreen("screen-tutorial");
-      if (pauseBtn) pauseBtn.disabled = true;
       requestAnimationFrame(() => document.getElementById("btnTutorialDismiss")?.focus());
     } else {
       showScreen("screen-game");
-      if (pauseBtn) {
-        if (awaitingDayRoll) {
-          pauseBtn.disabled = true;
-          const lab = pauseBtn.querySelector(".mts-pause-label");
-          if (lab) lab.textContent = "종료";
-          pauseBtn.classList.add("market-ended");
-        } else {
-          pauseBtn.disabled = false;
-          pauseBtn.classList.remove("market-ended");
-          updatePauseButton();
-        }
-      }
       startGameClockFromInit(false);
     }
   });
@@ -2992,9 +3109,6 @@ function startGameClockFromInit(loaded) {
       scheduleAmbientNewsTimer();
     } else if (awaitingDayRoll) {
       scheduleNextTradingDay();
-    } else if (isPaused) {
-      clearGameClockTimer();
-      clearAmbientNewsTimer();
     } else {
       startGameClockTimer();
       scheduleAmbientNewsTimer();
@@ -3003,20 +3117,6 @@ function startGameClockFromInit(loaded) {
     if (phoneClockIntervalId) clearInterval(phoneClockIntervalId);
     updatePhoneShellClock();
     phoneClockIntervalId = setInterval(updatePhoneShellClock, 15000);
-
-    const pb = document.getElementById("btnPause");
-    if (pb) {
-      if (awaitingDayRoll) {
-        pb.disabled = true;
-        const lab = pb.querySelector(".mts-pause-label");
-        if (lab) lab.textContent = "종료";
-        pb.classList.add("market-ended");
-      } else {
-        pb.disabled = false;
-        pb.classList.remove("market-ended");
-        updatePauseButton();
-      }
-    }
 
     renderAssetSummary();
     renderLifeStatus();
@@ -3037,18 +3137,6 @@ function renderDateTimeLine() {
   if (!el) return;
   el.textContent = formatDateTimeBracket();
   updatePhoneShellClock();
-}
-
-function volatilityBadgeClass(vol) {
-  if (vol === "high") return "mts-badge-high";
-  if (vol === "medium") return "mts-badge-mid";
-  return "mts-badge-low";
-}
-
-function volatilityLabel(vol) {
-  if (vol === "high") return "고변동";
-  if (vol === "medium") return "중변동";
-  return "저변동";
 }
 
 function toggleWatchlist(stockId) {
@@ -3119,10 +3207,9 @@ function renderStockListMain() {
         <div class="stock-list-name-block">
           <span class="stock-list-name">${escapeHtml(s.name)}</span>
           <span class="stock-list-ticker">${escapeHtml(s.id)}</span>
-          <span class="mts-badge ${volatilityBadgeClass(s.volatility)}">${volatilityLabel(s.volatility)}</span>
         </div>
         <div class="stock-list-price-block">
-          <span class="stock-list-price watch-price" data-watch-price="${escapeHtml(s.id)}">${formatWon(s.price)}</span>
+          <span class="stock-list-price watch-price" data-watch-price="${escapeHtml(s.id)}">${formatStockWon(s.price)}</span>
           <span class="stock-list-pct ${chgCls}">${sign}${chgPct.toFixed(2)}%</span>
         </div>
       </div>
@@ -3155,7 +3242,18 @@ function updateDetailPriceLine() {
   if (!selectedStockId) return;
   const s = getStockById(selectedStockId);
   const el = document.getElementById("detailCurrentPrice");
-  if (el && s) el.textContent = formatWon(s.price);
+  if (!el || !s) return;
+  const prev = detailLastShownPrice;
+  el.textContent = formatStockWon(s.price);
+  if (prev != null && prev !== s.price) {
+    el.classList.remove("detail-price-tick-up", "detail-price-tick-down");
+    void el.offsetWidth;
+    el.classList.add(s.price > prev ? "detail-price-tick-up" : "detail-price-tick-down");
+    window.setTimeout(() => {
+      el.classList.remove("detail-price-tick-up", "detail-price-tick-down");
+    }, 420);
+  }
+  detailLastShownPrice = s.price;
 }
 
 function openStockDetail(stockId) {
@@ -3172,14 +3270,14 @@ function openStockDetail(stockId) {
   const nameEl = document.getElementById("detailStockName");
   const tickEl = document.getElementById("detailStockTicker");
   const descEl = document.getElementById("detailStockDesc");
-  const badge = document.getElementById("detailVolBadge");
   if (nameEl) nameEl.textContent = s.name;
   if (tickEl) tickEl.textContent = s.id;
   if (descEl) descEl.textContent = s.desc || "";
-  if (badge) {
-    badge.className = `mts-badge ${volatilityBadgeClass(s.volatility)}`;
-    badge.textContent = volatilityLabel(s.volatility);
-  }
+
+  detailChartRange = "all";
+  apexDetail.chartRange = "all";
+  syncDetailChartRangeButtons();
+  detailLastShownPrice = null;
   updateDetailPriceLine();
 
   initDetailCharts(stockId);
@@ -3444,21 +3542,11 @@ function renderCalendarUI() {
 }
 
 function applyCalendarEventPayload(ev) {
-  const oldPrices = snapshotPrices();
   const impacts = {};
   ev.targets.forEach((id) => {
     impacts[id] = ev.shock;
   });
-  applyImpactFormula(impacts);
-  ev.targets.forEach((id) => {
-    const s = getStockById(id);
-    if (!s) return;
-    s.volatilityMod = Math.min(2.85, s.volatilityMod * ev.volBump);
-    const b = ev.sentiment === "good" ? 0.0055 : -0.0055;
-    s.priceBias += b;
-    s.priceBias = Math.max(-0.12, Math.min(0.12, s.priceBias));
-  });
-  finalizePriceUI(oldPrices);
+  scheduleNewsSpikeFromImpacts(impacts);
 }
 
 function fireDueCalendarEvents() {
@@ -3476,7 +3564,7 @@ function fireDueCalendarEvents() {
 function onSessionSecondTick() {
   if (tutorialGateActive) return;
   if (onlineMode) return;
-  if (isPaused || awaitingDayRoll) return;
+  if (awaitingDayRoll) return;
   if (!shouldAdvanceMarketClock()) return;
 
   if (gameMinutes < MARKET_OPEN_MIN) {
@@ -3596,9 +3684,7 @@ function openNextTradingDay() {
   generatePremarketNewsPlan();
   dividendCandleCounter = 0;
 
-  stocks.forEach((s) => {
-    s.priceBias = 0;
-  });
+  resetNewsSpikeState();
 
   ensureCalendarHorizon();
   fireDueCalendarEvents();
@@ -3634,52 +3720,8 @@ function closeMarket() {
   });
   setMessage("장 마감 — 다음 거래일 08:00부터 프리마켓이 시작됩니다.", "ok");
 
-  const pauseBtn = document.getElementById("btnPause");
-  if (pauseBtn) {
-    pauseBtn.disabled = true;
-    pauseBtn.querySelector(".mts-pause-label").textContent = "종료";
-    pauseBtn.classList.add("market-ended");
-  }
-
   flushPersistUser();
   scheduleNextTradingDay();
-  syncNextTurnButton();
-}
-
-function updatePauseButton() {
-  const btn = document.getElementById("btnPause");
-  if (!btn || awaitingDayRoll) return;
-  const label = btn.querySelector(".mts-pause-label");
-  if (isPaused) {
-    if (label) label.textContent = "재개";
-    btn.classList.add("paused");
-    btn.setAttribute("aria-pressed", "true");
-    btn.setAttribute("aria-label", "시간 재개");
-  } else {
-    if (label) label.textContent = "멈춤";
-    btn.classList.remove("paused");
-    btn.setAttribute("aria-pressed", "false");
-    btn.setAttribute("aria-label", "시간 멈춤");
-  }
-}
-
-function setPaused(paused) {
-  if (onlineMode) {
-    setMessage("온라인 모드에서는 공용 시장 시계를 멈출 수 없습니다.", "err");
-    return;
-  }
-  if (awaitingDayRoll) return;
-  if (!gameClockEverStarted) return;
-  isPaused = paused;
-  if (isPaused) {
-    clearGameClockTimer();
-    clearAmbientNewsTimer();
-  } else {
-    startGameClockTimer();
-    scheduleAmbientNewsTimer();
-  }
-  updatePauseButton();
-  schedulePersistUser();
   syncNextTurnButton();
 }
 
@@ -3699,7 +3741,7 @@ function renderStocks() {
     const tr = document.createElement("tr");
     const owned = game.holdings[s.id] ?? 0;
     const cb = game.costBasis[s.id] ?? 0;
-    const avg = owned > 0 ? Math.round(cb / owned) : 0;
+    const avg = owned > 0 ? Math.floor(cb / owned) : 0;
     const evalVal = owned * s.price;
     const pl = Math.round(evalVal - cb);
     const plCls = pl > 0 ? "chg-up" : pl < 0 ? "chg-down" : "chg-flat";
@@ -3709,8 +3751,8 @@ function renderStocks() {
         <span class="stock-name">${escapeHtml(s.name)}</span>
         <span class="stock-ticker">${escapeHtml(s.id)}</span>
       </td>
-      <td><span data-portfolio-price="${escapeHtml(s.id)}" class="watch-price">${formatWon(s.price)}</span></td>
-      <td>${owned > 0 ? formatWon(avg) : "—"}</td>
+      <td><span data-portfolio-price="${escapeHtml(s.id)}" class="watch-price">${formatStockWon(s.price)}</span></td>
+      <td>${owned > 0 ? formatStockWon(avg) : "—"}</td>
       <td>${owned > 0 ? formatShares(owned) : "—"}</td>
       <td class="${plCls}">${owned > 0 ? `${pl >= 0 ? "+" : ""}${formatWon(pl)}` : "—"}</td>
       <td class="cell-qty-portfolio">
@@ -3863,10 +3905,6 @@ function onNextTurn() {
   schedulePersistUser();
 }
 
-function onPauseClick() {
-  setPaused(!isPaused);
-}
-
 function initNewGame() {
   gameDayIndex = 0;
   gameMinutes = MARKET_OPEN_MIN;
@@ -3875,7 +3913,6 @@ function initNewGame() {
   openingGapAppliedToday = true;
   premarketNewsCounts = emptyPremarketNewsCounts();
   premarketNewsScheduleByMin = {};
-  isPaused = false;
   scheduledEvents = buildInitialCalendar();
   ensureCalendarHorizon();
 
@@ -3889,9 +3926,8 @@ function initNewGame() {
 
   stocks.forEach((s) => {
     s.price = randomInitialPrice();
-    s.volatilityMod = 1;
-    s.priceBias = 0;
   });
+  resetNewsSpikeState();
 
   headlineImpulse = 0;
   dividendCandleCounter = 0;
@@ -3932,19 +3968,7 @@ async function runGameBootstrap() {
 
   initTabs();
 
-  const pauseBtn = document.getElementById("btnPause");
-  if (pauseBtn) {
-    pauseBtn.addEventListener("click", onPauseClick);
-    if (awaitingDayRoll) {
-      pauseBtn.disabled = true;
-      pauseBtn.querySelector(".mts-pause-label").textContent = "종료";
-      pauseBtn.classList.add("market-ended");
-    } else {
-      pauseBtn.disabled = false;
-      pauseBtn.classList.remove("market-ended");
-      updatePauseButton();
-    }
-  }
+  bindDetailChartRangeUiOnce();
 
   bindLifeUi();
   bindCharacterSetup();
