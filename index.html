@@ -133,8 +133,6 @@
           <div class="life-profile-row" id="lifeProfileRow">
             <span class="life-profile-name" id="profileNameDisplay">—</span>
             <span class="life-profile-meta"
-              ><span id="profileAgeDisplay">—</span
-              ><span class="life-profile-dot" aria-hidden="true">·</span
               ><span id="profileBirthDisplay">—</span></span
             >
           </div>
@@ -167,10 +165,6 @@
               <span class="asset-label">매입금액</span>
               <span id="summaryCost" class="asset-cell-value">₩0</span>
             </div>
-            <div class="asset-cell">
-              <span class="asset-label">시뮬 나이</span>
-              <span id="age" class="asset-cell-value">25세</span>
-            </div>
           </div>
         </section>
 
@@ -184,7 +178,7 @@
             <section id="marketListView" class="mts-section">
               <h2 class="mts-section-title">시장 · 종목</h2>
               <p class="mts-section-desc">
-                08:00~09:00 프리마켓(매매 불가) → 09:00~15:30 정규장 ·
+                08:00~09:00 프리마켓 → 09:00~15:30 정규장 · 15:30~16:30 시간외(지정가만) ·
                 <strong>현실 1초 = 장내 1분</strong> · 10분봉 = 현실 10초마다 확정 · 종목을 눌러 차트·매매
               </p>
               <ul id="stockListMain" class="stock-list-main" aria-label="종목 목록"></ul>
@@ -295,6 +289,33 @@
                     금액(원)
                   </button>
                 </div>
+                <div class="detail-qty-mode-row" role="group" aria-label="주문 유형">
+                  <button
+                    type="button"
+                    class="btn-mts ghost detail-order-type-btn is-active"
+                    data-detail-order-type="market"
+                  >
+                    시장가
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-mts ghost detail-order-type-btn"
+                    data-detail-order-type="limit"
+                  >
+                    지정가
+                  </button>
+                </div>
+                <div class="detail-trade-row" id="detailLimitPriceRow" hidden>
+                  <label class="detail-label" for="detailLimitPriceInput">예약가(원)</label>
+                  <input
+                    type="number"
+                    id="detailLimitPriceInput"
+                    class="qty-input detail-qty"
+                    min="1"
+                    step="1"
+                    inputmode="numeric"
+                  />
+                </div>
                 <div class="detail-trade-row">
                   <label class="detail-label" id="detailQtyLabel" for="detailQtyInput">수량(주)</label>
                   <input
@@ -336,6 +357,10 @@
                   <button type="button" id="detailBtnSell" class="btn-mts sell wide">
                     매도
                   </button>
+                </div>
+                <div class="detail-pending-orders" aria-label="지정가 대기 주문">
+                  <h4 class="detail-pending-title">지정가 대기</h4>
+                  <ul id="detailPendingOrdersList" class="detail-pending-list"></ul>
                 </div>
               </div>
             </section>

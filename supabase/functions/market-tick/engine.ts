@@ -7,7 +7,10 @@ export const CANDLE_GAME_MINUTES = 10;
 export const TICKS_PER_CANDLE = 10;
 export const DIVIDEND_EVERY_CANDLES = 4;
 export const MARKET_OPEN_MIN = 9 * 60;
-export const MARKET_CLOSE_MIN = 15 * 60 + 30;
+/** 정규장 15:30까지 가격 틱 */
+export const MARKET_REGULAR_CLOSE_MIN = 15 * 60 + 30;
+/** 장 종료 16:30 (클라이언트 script.js 와 동일) */
+export const MARKET_CLOSE_MIN = 16 * 60 + 30;
 export const NEXT_TRADING_DAY_DELAY_MS = 2200;
 export const MAX_CANDLES_PER_STOCK = 2000;
 export const MAX_NEWS_FEED = 48;
@@ -30,6 +33,8 @@ export const STOCK_SPECS = [
   { id: "JWF", name: "진우펀드" },
   { id: "YHL", name: "요한룩" },
   { id: "SWB", name: "선웅비즈" },
+  { id: "GDR", name: "고배당 리츠" },
+  { id: "MIX", name: "시장종합 ETF" },
 ] as const;
 
 export type StockRow = {
@@ -210,9 +215,23 @@ function scheduleNewsSpikeFromImpacts(st: MarketState, impacts: Record<string, n
   });
 }
 
+function syncEtfFromMarket(st: MarketState): void {
+  const etf = getStock(st, "MIX");
+  if (!etf) return;
+  let sum = 0;
+  let n = 0;
+  st.stocks.forEach((s) => {
+    if (s.id === "MIX") return;
+    sum += s.price;
+    n += 1;
+  });
+  if (n > 0) etf.price = clampStockPrice(Math.floor(sum / n));
+}
+
 function oneMicroPriceStep(st: MarketState): void {
   st.stocks.forEach((s) => {
     const id = s.id;
+    if (id === "MIX") return;
     const spikeLeft = st.newsSpikeTicksLeft[id] ?? 0;
     let delta = 0;
     if (spikeLeft > 0) {
@@ -223,11 +242,14 @@ function oneMicroPriceStep(st: MarketState): void {
       } else {
         delta = -(20 + Math.floor(Math.random() * 21));
       }
+    } else if (id === "GDR") {
+      delta = -1 + Math.floor(Math.random() * 3);
     } else {
       delta = -2 + Math.floor(Math.random() * 5);
     }
     s.price = clampStockPrice(s.price + delta);
   });
+  syncEtfFromMarket(st);
 }
 
 function pushNews(st: MarketState, text: string, type: string): void {
@@ -443,6 +465,13 @@ export function onSessionSecondTick(st: MarketState): void {
   if (st.isPaused || st.isMarketClosed) return;
   if (st.gameMinutes >= MARKET_CLOSE_MIN) {
     closeMarket(st);
+    return;
+  }
+  if (st.gameMinutes >= MARKET_REGULAR_CLOSE_MIN && st.gameMinutes < MARKET_CLOSE_MIN) {
+    st.gameMinutes += GAME_MINUTES_PER_REAL_SEC;
+    if (st.gameMinutes >= MARKET_CLOSE_MIN) {
+      closeMarket(st);
+    }
     return;
   }
   beginCandlePeriodIfNeeded(st);
