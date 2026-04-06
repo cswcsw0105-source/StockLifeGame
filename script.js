@@ -983,19 +983,55 @@ function applyServerMarketState(m) {
   syncNextTurnButton();
 }
 
+/** DB에 행이 없거나 state가 비어 있을 때: 현재 클라이언트 시장 스냅샷(동전주 초기화 직후 initNewGame 기준)을 upsert */
+async function seedMarketStateFromCurrentClient() {
+  if (!sb) return false;
+  const stateObj = serializeMarketState();
+  const { error } = await sb.from(TBL_MARKET_STATE).upsert(
+    { id: 1, state: stateObj },
+    { onConflict: "id" }
+  );
+  if (error) {
+    console.warn("seedMarketStateFromCurrentClient", error);
+    setMessage(
+      "시장 초기 저장에 실패했습니다. Supabase에서 market_state에 대한 INSERT 권한(RLS)을 확인하세요.",
+      "err"
+    );
+    return false;
+  }
+  applyServerMarketState(stateObj);
+  setMessage("시장 데이터가 없어 동전주(100~200원) 초기 세팅을 저장했습니다.", "ok");
+  return true;
+}
+
+function shouldSeedMarketState(serverState) {
+  if (serverState == null) return true;
+  if (typeof serverState !== "object") return true;
+  if (serverState.initialized === false) return true;
+  if (!Array.isArray(serverState.stocks) || serverState.stocks.length === 0) {
+    return true;
+  }
+  return false;
+}
+
 async function fetchMarketOnce() {
   if (!sb) return;
   const { data, error } = await sb
     .from(TBL_MARKET_STATE)
     .select("state")
     .eq("id", 1)
-    .single();
+    .maybeSingle();
   if (error) {
     console.warn("fetchMarketOnce", error);
     setMessage("시장 데이터를 불러오지 못했습니다. Edge Function·DB를 확인하세요.", "err");
     return;
   }
-  if (data?.state) applyServerMarketState(data.state);
+  const raw = data?.state;
+  if (!data || shouldSeedMarketState(raw)) {
+    await seedMarketStateFromCurrentClient();
+    return;
+  }
+  applyServerMarketState(raw);
 }
 
 function clearMarketClientTick() {

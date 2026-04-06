@@ -70,6 +70,9 @@ CREATE POLICY "market_state_read_all" ON public.market_state FOR SELECT USING (T
 DROP POLICY IF EXISTS "market_state_update_all" ON public.market_state;
 CREATE POLICY "market_state_update_all" ON public.market_state FOR UPDATE USING (TRUE) WITH CHECK (TRUE);
 
+DROP POLICY IF EXISTS "market_state_insert_all" ON public.market_state;
+CREATE POLICY "market_state_insert_all" ON public.market_state FOR INSERT WITH CHECK (TRUE);
+
 -- ----- 5) Realtime: market_state를 publication에 등록 -----
 DO $pub$
 BEGIN
@@ -306,7 +309,7 @@ $$;
 GRANT USAGE ON SCHEMA public TO anon, authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.users TO anon, authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.portfolios TO anon, authenticated;
-GRANT SELECT ON public.market_state TO anon, authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.market_state TO anon, authenticated;
 
 GRANT EXECUTE ON FUNCTION public.normalize_player_name(TEXT) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.execute_buy_by_name(TEXT, TEXT, BIGINT) TO anon, authenticated;
