@@ -2881,6 +2881,49 @@ function prependMultiplyTradeFeedRow(row) {
   }
 }
 
+const TRADE_TOAST_MAX_STACK = 6;
+const TRADE_TOAST_VISIBLE_MS = 4600;
+
+function tradeToastVariantClass(row) {
+  if (row.side === "buy") return "trade-toast--buy";
+  const p = row.profit != null ? Number(row.profit) : 0;
+  if (p > 0) return "trade-toast--win";
+  if (p < 0) return "trade-toast--loss";
+  return "trade-toast--flat";
+}
+
+/** 다른 유저 매매만 우측 상단 토스트(본인 INSERT는 제외) */
+function pushTradeLogToast(row) {
+  if (!row || tutorialGateActive) return;
+  if (!onlineMode || !sb) return;
+  if (!loginDisplayName) return;
+  const actor = String(row.login_name || "").trim();
+  if (actor && actor === String(loginDisplayName).trim()) return;
+
+  const stack = document.getElementById("tradeToastStack");
+  if (!stack) return;
+
+  const el = document.createElement("div");
+  el.className = `trade-toast-item ${tradeToastVariantClass(row)}`;
+  el.setAttribute("role", "status");
+  el.innerHTML = tradeFeedLineHtml(row);
+
+  stack.insertBefore(el, stack.firstChild);
+  while (stack.children.length > TRADE_TOAST_MAX_STACK) {
+    stack.lastChild?.remove();
+  }
+
+  requestAnimationFrame(() => {
+    el.classList.add("trade-toast-item--visible");
+  });
+
+  window.setTimeout(() => {
+    el.classList.remove("trade-toast-item--visible");
+    el.classList.add("trade-toast-item--leaving");
+    window.setTimeout(() => el.remove(), 400);
+  }, TRADE_TOAST_VISIBLE_MS);
+}
+
 async function fetchMultiplyTradeLogsInitial() {
   if (!sb || !onlineMode) return;
   const ul = document.getElementById("mpTradeFeed");
@@ -3015,7 +3058,10 @@ function subscribeMultiplayerRealtime() {
       (payload) => {
         try {
           const row = payload.new;
-          if (row) prependMultiplyTradeFeedRow(row);
+          if (row) {
+            prependMultiplyTradeFeedRow(row);
+            pushTradeLogToast(row);
+          }
         } catch (e) {
           console.warn("trade_logs realtime", e);
         }
