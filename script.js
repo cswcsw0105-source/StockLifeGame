@@ -535,11 +535,19 @@ const candleHistory = Object.fromEntries(
 );
 
 /** 상세 화면 캔들/거래량 차트만 사용 */
-const apexDetail = { candle: null, vol: null, stockId: null, chartRange: "all" };
+const apexDetail = {
+  candle: null,
+  vol: null,
+  stockId: null,
+  chartRange: "all",
+  chartType: "candle",
+};
 
 let selectedStockId = null;
 /** 상세 차트 기간: all | d2 | d5 | w1 | m1 */
 let detailChartRange = "all";
+/** 상세 차트: candle | line */
+let detailChartType = "candle";
 /** 종목 상세 현재가 표시 직전 가격(틱 애니메이션) */
 let detailLastShownPrice = null;
 
@@ -3640,6 +3648,144 @@ function buildVolumeSeriesData(stockId) {
   return rows;
 }
 
+/** X축 `categories`와 동기화하기 위해 캔들 데이터를 y만 담은 형태로 분리 */
+function getDetailChartCategoriesAndCandleSeries(stockId) {
+  const points = buildCandleSeriesData(stockId);
+  return {
+    categories: points.map((p) => String(p.x)),
+    seriesData: points.map((p) => ({ y: p.y })),
+  };
+}
+
+/** 종가 기준 선차트 — X 라벨은 캔들과 동일한 시계열 */
+function buildLineSeriesData(stockId) {
+  const hist = getFilteredCandleHistory(stockId);
+  const rows = hist.map((r) => ({
+    x: r.x,
+    y: Math.floor(r.c),
+  }));
+  if (
+    tickInCandle > 0 &&
+    isTradingWindowActive() &&
+    gameMinutes < MARKET_CLOSE_MIN &&
+    candleOhlcBuffer[stockId]
+  ) {
+    const b = candleOhlcBuffer[stockId];
+    const s = getStockById(stockId);
+    if (s) {
+      rows.push({
+        x: formatCandleXLabel(gameDayIndex, candlePeriodStartMin),
+        y: Math.floor(s.price),
+      });
+    }
+  }
+  return rows;
+}
+
+function detailLineStrokeColor(stockId) {
+  const pts = buildLineSeriesData(stockId);
+  if (pts.length < 2) return CANDLE_UP;
+  const a = pts[0].y;
+  const b = pts[pts.length - 1].y;
+  return b >= a ? CANDLE_UP : CANDLE_DOWN;
+}
+
+function computeDetailChartYBounds(stockId) {
+  const avg = getAvgCostForStock(stockId);
+  let min = Infinity;
+  let max = -Infinity;
+  if (detailChartType === "line") {
+    const pts = buildLineSeriesData(stockId);
+    pts.forEach((p) => {
+      min = Math.min(min, p.y);
+      max = Math.max(max, p.y);
+    });
+  } else {
+    const pts = buildCandleSeriesData(stockId);
+    pts.forEach((p) => {
+      const [o, h, l, c] = p.y;
+      min = Math.min(min, o, h, l, c);
+      max = Math.max(max, o, h, l, c);
+    });
+  }
+  if (avg != null) {
+    min = Math.min(min, avg);
+    max = Math.max(max, avg);
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return {};
+  if (min === max) {
+    const pad = Math.max(1, Math.floor(min * 0.004) || 1);
+    return { min: min - pad, max: max + pad };
+  }
+  const span = max - min;
+  const pad = Math.max(span * 0.06, 1);
+  return {
+    min: Math.floor(min - pad),
+    max: Math.ceil(max + pad),
+  };
+}
+
+function detailChartXaxisConfig(categories) {
+  return {
+    type: "category",
+    categories: categories || [],
+    labels: {
+      rotate: -45,
+      style: { colors: "#8b95a8", fontSize: "8px" },
+      maxHeight: 80,
+    },
+    axisBorder: { show: false },
+    axisTicks: { show: false },
+  };
+}
+
+function detailChartYaxisConfig(yb) {
+  const base = {
+    labels: {
+      style: { colors: "#8b95a8", fontSize: "10px" },
+      formatter: (v) => Math.floor(v).toLocaleString("ko-KR"),
+    },
+  };
+  if (
+    yb &&
+    typeof yb.min === "number" &&
+    typeof yb.max === "number" &&
+    Number.isFinite(yb.min) &&
+    Number.isFinite(yb.max)
+  ) {
+    return { ...base, min: yb.min, max: yb.max, forceNiceScale: false };
+  }
+  return base;
+}
+
+function syncDetailChartTypeButtons() {
+  document.querySelectorAll("[data-chart-type]").forEach((b) => {
+    const t = b.getAttribute("data-chart-type");
+    const on = t === detailChartType;
+    b.classList.toggle("is-active", on);
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
+function bindDetailChartTypeToggleOnce() {
+  const bar = document.getElementById("detailChartTypeBar");
+  if (!bar || bar.dataset.bound === "1") return;
+  bar.dataset.bound = "1";
+  bar.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-chart-type]");
+    if (!btn) return;
+    const t = btn.getAttribute("data-chart-type");
+    if (t !== "candle" && t !== "line") return;
+    if (t === detailChartType) return;
+    detailChartType = t;
+    apexDetail.chartType = t;
+    syncDetailChartTypeButtons();
+    if (selectedStockId) {
+      initDetailCharts(selectedStockId);
+    }
+  });
+}
+
 function destroyDetailCharts() {
   if (apexDetail.candle) {
     apexDetail.candle.destroy();
@@ -3665,56 +3811,80 @@ function initDetailCharts(stockId) {
   cEl.innerHTML = "";
   vEl.innerHTML = "";
 
-  const candleBase = apexCommonChartOpts(210, "candlestick");
-  const candleOpts = {
-    ...candleBase,
-    chart: {
-      ...candleBase.chart,
-      animations: {
-        enabled: true,
-        easing: "easeinout",
-        speed: 420,
-        dynamicAnimation: { enabled: true, speed: 260 },
-      },
-    },
-    series: [
-      {
-        name: stockId,
-        data: buildCandleSeriesData(stockId),
-      },
-    ],
-    stroke: {
-      width: [1.15],
-      lineCap: "round",
-      lineJoin: "round",
-    },
-    plotOptions: {
-      candlestick: {
-        colors: {
-          upward: CANDLE_UP,
-          downward: CANDLE_DOWN,
+  const { categories, seriesData } = getDetailChartCategoriesAndCandleSeries(stockId);
+  const volPts = buildVolumeSeriesData(stockId);
+  const volData = volPts.map((p) => ({
+    y: p.y,
+    fillColor: p.fillColor,
+  }));
+  const yb = computeDetailChartYBounds(stockId);
+  const ann = buildDetailChartAnnotations(stockId);
+  const xaxisShared = detailChartXaxisConfig(categories);
+
+  let mainOpts;
+  if (detailChartType === "line") {
+    const linePts = buildLineSeriesData(stockId);
+    const lineColor = detailLineStrokeColor(stockId);
+    const lineNums = linePts.map((p) => p.y);
+    const lineBase = apexCommonChartOpts(210, "line");
+    mainOpts = {
+      ...lineBase,
+      chart: {
+        ...lineBase.chart,
+        animations: {
+          enabled: true,
+          easing: "easeinout",
+          speed: 420,
+          dynamicAnimation: { enabled: true, speed: 260 },
         },
       },
-    },
-    annotations: buildDetailChartAnnotations(stockId),
-    xaxis: {
-      type: "category",
-      labels: {
-        rotate: -45,
-        style: { colors: "#8b95a8", fontSize: "8px" },
-        maxHeight: 80,
+      colors: [lineColor],
+      series: [{ name: stockId, data: lineNums }],
+      stroke: {
+        width: 2.5,
+        curve: "smooth",
+        colors: [lineColor],
       },
-      axisBorder: { show: false },
-      axisTicks: { show: false },
-      tickAmount: 12,
-    },
-    yaxis: {
-      labels: {
-        style: { colors: "#8b95a8", fontSize: "10px" },
-        formatter: (v) => Math.floor(v).toLocaleString("ko-KR"),
+      markers: {
+        size: 0,
+        hover: { size: 4 },
       },
-    },
-  };
+      annotations: ann,
+      xaxis: xaxisShared,
+      yaxis: detailChartYaxisConfig(yb),
+    };
+  } else {
+    const candleBase = apexCommonChartOpts(210, "candlestick");
+    mainOpts = {
+      ...candleBase,
+      chart: {
+        ...candleBase.chart,
+        animations: {
+          enabled: true,
+          easing: "easeinout",
+          speed: 420,
+          dynamicAnimation: { enabled: true, speed: 260 },
+        },
+      },
+      series: [{ name: stockId, data: seriesData }],
+      stroke: {
+        width: [1.15],
+        lineCap: "round",
+        lineJoin: "round",
+      },
+      plotOptions: {
+        candlestick: {
+          colors: {
+            upward: CANDLE_UP,
+            downward: CANDLE_DOWN,
+          },
+        },
+      },
+      annotations: ann,
+      xaxis: xaxisShared,
+      yaxis: detailChartYaxisConfig(yb),
+    };
+  }
 
   const volBase = apexCommonChartOpts(88, "bar");
   const volOpts = {
@@ -3728,12 +3898,7 @@ function initDetailCharts(stockId) {
         dynamicAnimation: { enabled: true, speed: 240 },
       },
     },
-    series: [
-      {
-        name: "거래량",
-        data: buildVolumeSeriesData(stockId),
-      },
-    ],
+    series: [{ name: "거래량", data: volData }],
     plotOptions: {
       bar: {
         columnWidth: "72%",
@@ -3741,18 +3906,18 @@ function initDetailCharts(stockId) {
       },
     },
     xaxis: {
-      type: "category",
+      ...xaxisShared,
       labels: { show: false },
-      axisBorder: { show: false },
-      axisTicks: { show: false },
     },
     yaxis: { show: false },
   };
 
   try {
-    apexDetail.candle = new ApexCharts(cEl, candleOpts);
+    apexDetail.candle = new ApexCharts(cEl, mainOpts);
     apexDetail.vol = new ApexCharts(vEl, volOpts);
     apexDetail.stockId = stockId;
+    apexDetail.chartRange = detailChartRange;
+    apexDetail.chartType = detailChartType;
     apexDetail.candle.render();
     apexDetail.vol.render();
   } catch (e) {
@@ -3766,22 +3931,65 @@ function initDetailCharts(stockId) {
 function refreshDetailChart() {
   if (!selectedStockId || !apexDetail.candle || !apexDetail.vol) return;
   const id = selectedStockId;
-  apexDetail.candle.updateSeries(
-    [{ name: id, data: buildCandleSeriesData(id) }],
-    true
-  );
-  apexDetail.vol.updateSeries(
-    [{ name: "거래량", data: buildVolumeSeriesData(id) }],
-    true
-  );
+  const { categories, seriesData } = getDetailChartCategoriesAndCandleSeries(id);
+  const volPts = buildVolumeSeriesData(id);
+  const volData = volPts.map((p) => ({
+    y: p.y,
+    fillColor: p.fillColor,
+  }));
+  const yb = computeDetailChartYBounds(id);
+  const ann = buildDetailChartAnnotations(id);
+  const xaxisShared = detailChartXaxisConfig(categories);
+
   try {
-    apexDetail.candle.updateOptions(
-      { annotations: buildDetailChartAnnotations(id) },
+    if (detailChartType === "line") {
+      const linePts = buildLineSeriesData(id);
+      const lineColor = detailLineStrokeColor(id);
+      apexDetail.candle.updateSeries(
+        [{ name: id, data: linePts.map((p) => p.y) }],
+        true
+      );
+      apexDetail.candle.updateOptions(
+        {
+          colors: [lineColor],
+          stroke: {
+            curve: "smooth",
+            width: 2.5,
+            colors: [lineColor],
+          },
+          xaxis: xaxisShared,
+          yaxis: detailChartYaxisConfig(yb),
+          annotations: ann,
+        },
+        false,
+        true
+      );
+    } else {
+      apexDetail.candle.updateSeries([{ name: id, data: seriesData }], true);
+      apexDetail.candle.updateOptions(
+        {
+          xaxis: xaxisShared,
+          yaxis: detailChartYaxisConfig(yb),
+          annotations: ann,
+        },
+        false,
+        true
+      );
+    }
+
+    apexDetail.vol.updateSeries([{ name: "거래량", data: volData }], true);
+    apexDetail.vol.updateOptions(
+      {
+        xaxis: {
+          ...xaxisShared,
+          labels: { show: false },
+        },
+      },
       false,
       true
     );
   } catch (e) {
-    console.warn("refreshDetailChart annotations", e);
+    console.warn("refreshDetailChart", e);
   }
   updateOrderBookAndStrength(id);
   updateDetailTradeLivePreview();
@@ -4333,6 +4541,7 @@ function openStockDetail(stockId) {
   detailChartRange = "all";
   apexDetail.chartRange = "all";
   syncDetailChartRangeButtons();
+  syncDetailChartTypeButtons();
   detailLastShownPrice = null;
   updateDetailPriceLine();
 
@@ -5144,6 +5353,7 @@ async function runGameBootstrap() {
   initTabs();
 
   bindDetailChartRangeUiOnce();
+  bindDetailChartTypeToggleOnce();
 
   bindLifeUi();
   bindCharacterSetup();

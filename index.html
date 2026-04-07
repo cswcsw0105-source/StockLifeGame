@@ -215,19 +215,48 @@
                 </button>
               </div>
               <p id="detailStockDesc" class="stock-detail-desc"></p>
-              <div
-                id="detailChartRangeBar"
-                class="detail-chart-range-bar"
-                role="toolbar"
-                aria-label="차트 기간"
-              >
-                <button type="button" class="detail-chart-range-btn is-active" data-chart-range="all">
-                  전체
-                </button>
-                <button type="button" class="detail-chart-range-btn" data-chart-range="d2">2일</button>
-                <button type="button" class="detail-chart-range-btn" data-chart-range="d5">5일</button>
-                <button type="button" class="detail-chart-range-btn" data-chart-range="w1">1주</button>
-                <button type="button" class="detail-chart-range-btn" data-chart-range="m1">1달</button>
+              <div class="detail-chart-toolbar">
+                <div
+                  id="detailChartRangeBar"
+                  class="detail-chart-range-bar"
+                  role="toolbar"
+                  aria-label="차트 기간"
+                >
+                  <button type="button" class="detail-chart-range-btn is-active" data-chart-range="all">
+                    전체
+                  </button>
+                  <button type="button" class="detail-chart-range-btn" data-chart-range="d2">2일</button>
+                  <button type="button" class="detail-chart-range-btn" data-chart-range="d5">5일</button>
+                  <button type="button" class="detail-chart-range-btn" data-chart-range="w1">1주</button>
+                  <button type="button" class="detail-chart-range-btn" data-chart-range="m1">1달</button>
+                </div>
+                <div
+                  id="detailChartTypeBar"
+                  class="detail-chart-type-bar"
+                  role="group"
+                  aria-label="차트 종류"
+                >
+                  <button
+                    type="button"
+                    class="detail-chart-type-btn is-active"
+                    data-chart-type="candle"
+                    title="캔들(봉)"
+                    aria-pressed="true"
+                  >
+                    <span class="detail-chart-type-icon" aria-hidden="true">▤</span>
+                    <span class="detail-chart-type-label">봉</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="detail-chart-type-btn"
+                    data-chart-type="line"
+                    title="종가 선차트"
+                    aria-pressed="false"
+                  >
+                    <span class="detail-chart-type-icon" aria-hidden="true">〜</span>
+                    <span class="detail-chart-type-label">선</span>
+                  </button>
+                </div>
               </div>
               <div class="chart-stack">
                 <div
