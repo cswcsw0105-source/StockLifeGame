@@ -546,6 +546,15 @@ const apexDetail = {
 let selectedStockId = null;
 /** 상세 차트 기간: all | d1(당일) | d5 | w1 | m1 */
 let detailChartRange = "all";
+
+/** 상세 차트 렌더 방어: 범위별 최대 포인트 수 */
+const DETAIL_CHART_MAX_POINTS = {
+  d1: 420, // 당일(10분봉) + 장중 진행 봉 여유
+  d5: 900,
+  w1: 1200,
+  m1: 1600,
+  all: 1800,
+};
 /** 상세 차트: candle | line */
 let detailChartType = "candle";
 /** 종목 상세 현재가 표시 직전 가격(틱 애니메이션) */
@@ -2180,10 +2189,21 @@ function filterCandleRowsForChartRange(rows, range) {
   return rows.filter((r) => (r.dayIndex ?? 0) >= minDay);
 }
 
+function capDetailChartRows(rows, range) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  const key = Object.prototype.hasOwnProperty.call(DETAIL_CHART_MAX_POINTS, range)
+    ? range
+    : "all";
+  const cap = DETAIL_CHART_MAX_POINTS[key];
+  if (!Number.isFinite(cap) || cap <= 0 || rows.length <= cap) return rows;
+  return rows.slice(-cap);
+}
+
 function getFilteredCandleHistory(stockId) {
   const raw = candleHistory[stockId] || [];
   const range = detailChartRange || "all";
-  return filterCandleRowsForChartRange(raw, range);
+  const filtered = filterCandleRowsForChartRange(raw, range);
+  return capDetailChartRows(filtered, range);
 }
 
 function getAvgCostForStock(stockId) {
