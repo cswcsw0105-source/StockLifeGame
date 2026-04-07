@@ -544,7 +544,7 @@ const apexDetail = {
 };
 
 let selectedStockId = null;
-/** 상세 차트 기간: all | d2 | d5 | w1 | m1 */
+/** 상세 차트 기간: all | d1(당일) | d5 | w1 | m1 */
 let detailChartRange = "all";
 /** 상세 차트: candle | line */
 let detailChartType = "candle";
@@ -2157,8 +2157,6 @@ function formatCandleXLabel(dayIndex, periodStartMin) {
 function minDayIndexForChartRange(range) {
   const d = gameDayIndex;
   switch (range) {
-    case "d2":
-      return Math.max(0, d - 1);
     case "d5":
       return Math.max(0, d - 4);
     case "w1":
@@ -2173,6 +2171,11 @@ function minDayIndexForChartRange(range) {
 function filterCandleRowsForChartRange(rows, range) {
   if (!rows || rows.length === 0) return [];
   if (range === "all") return rows;
+  /** 당일 장중 1분 틱에 대응하는 봉만 (dayIndex === 현재 거래일) */
+  if (range === "d1") {
+    const d = gameDayIndex;
+    return rows.filter((r) => (r.dayIndex ?? 0) === d);
+  }
   const minDay = minDayIndexForChartRange(range);
   return rows.filter((r) => (r.dayIndex ?? 0) >= minDay);
 }
@@ -2204,13 +2207,15 @@ function buildDetailChartAnnotations(stockId) {
         strokeDashArray: 6,
         label: {
           text: "평단",
+          position: "left",
+          textAnchor: "start",
+          borderColor: "transparent",
           style: {
             color: "#facc15",
             fontSize: "10px",
             fontWeight: 600,
+            background: "rgba(30, 30, 30, 0.7)",
           },
-          position: "right",
-          offsetX: -4,
         },
       },
     ],
@@ -3732,12 +3737,34 @@ function computeDetailChartYBounds(stockId) {
   };
 }
 
+const DETAIL_CHART_CROSSHAIR_STROKE = {
+  color: "rgba(139, 149, 168, 0.5)",
+  width: 1,
+  dashArray: 0,
+};
+
+/** 상세 차트 메인 — 호버 툴팁·십자선 */
+function detailChartMainTooltipOpts() {
+  return {
+    enabled: true,
+    theme: "dark",
+    shared: true,
+    intersect: false,
+    x: { show: true },
+  };
+}
+
 /** 상세 차트 X축 — 고정 옵션(Apex category + tickAmount 조합 오류 방지) */
 function detailChartXaxisConfig(categories) {
   return {
     type: "category",
     categories: Array.isArray(categories) ? categories : [],
     tickAmount: 6,
+    crosshairs: {
+      show: true,
+      position: "front",
+      stroke: DETAIL_CHART_CROSSHAIR_STROKE,
+    },
     labels: {
       rotate: -45,
       hideOverlappingLabels: true,
@@ -3754,6 +3781,11 @@ function detailChartXaxisConfigFallback(categories) {
   return {
     type: "category",
     categories: Array.isArray(categories) ? categories : [],
+    crosshairs: {
+      show: true,
+      position: "front",
+      stroke: DETAIL_CHART_CROSSHAIR_STROKE,
+    },
     labels: {
       rotate: -45,
       hideOverlappingLabels: true,
@@ -3767,6 +3799,11 @@ function detailChartXaxisConfigFallback(categories) {
 
 function detailChartYaxisConfig(yb) {
   const base = {
+    crosshairs: {
+      show: true,
+      position: "front",
+      stroke: DETAIL_CHART_CROSSHAIR_STROKE,
+    },
     labels: {
       style: { colors: "#8b95a8", fontSize: "10px" },
       formatter: (v) => Math.floor(v).toLocaleString("ko-KR"),
@@ -3867,6 +3904,7 @@ function buildDetailChartMainAndVolOpts(stockId, xa) {
         size: 0,
         hover: { size: 4 },
       },
+      tooltip: detailChartMainTooltipOpts(),
       annotations: ann,
       xaxis: xa,
       yaxis: detailChartYaxisConfig(yb),
@@ -3884,6 +3922,7 @@ function buildDetailChartMainAndVolOpts(stockId, xa) {
           dynamicAnimation: { enabled: true, speed: 260 },
         },
       },
+      tooltip: detailChartMainTooltipOpts(),
       series: [{ name: stockId, data: candleSeriesData }],
       stroke: {
         width: [1.15],
@@ -3928,6 +3967,7 @@ function buildDetailChartMainAndVolOpts(stockId, xa) {
       labels: { show: false },
     },
     yaxis: { show: false },
+    tooltip: { enabled: false },
   };
 
   return { mainOpts, volOpts };
@@ -4009,6 +4049,7 @@ function refreshDetailChart() {
             width: 2.5,
             colors: [lineColor],
           },
+          tooltip: detailChartMainTooltipOpts(),
           xaxis: xaxisShared,
           yaxis: detailChartYaxisConfig(yb),
           annotations: ann,
@@ -4020,6 +4061,7 @@ function refreshDetailChart() {
       apexDetail.candle.updateSeries([{ name: id, data: candleSeriesData }], true);
       apexDetail.candle.updateOptions(
         {
+          tooltip: detailChartMainTooltipOpts(),
           xaxis: xaxisShared,
           yaxis: detailChartYaxisConfig(yb),
           annotations: ann,
@@ -4036,6 +4078,7 @@ function refreshDetailChart() {
           ...xaxisShared,
           labels: { show: false },
         },
+        tooltip: { enabled: false },
       },
       false,
       true
