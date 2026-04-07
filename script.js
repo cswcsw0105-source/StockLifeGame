@@ -3725,18 +3725,48 @@ function computeDetailChartYBounds(stockId) {
   };
 }
 
+/**
+ * 상세 차트 X축 — 기간이 길어질수록 tick 수·회전으로 라벨 겹침 완화
+ * (Apex category + tickAmount 조합 — hideOverlappingLabels 병행)
+ */
 function detailChartXaxisConfig(categories) {
-  return {
-    type: "category",
-    categories: categories || [],
-    labels: {
-      rotate: -45,
-      style: { colors: "#8b95a8", fontSize: "8px" },
-      maxHeight: 80,
+  const cats = categories || [];
+  const n = cats.length;
+  const dense = n > 14;
+  const veryDense = n > 36;
+
+  let tickAmount;
+  if (n > 12) {
+    if (n > 96) tickAmount = 6;
+    else if (n > 56) tickAmount = 8;
+    else if (n > 28) tickAmount = 9;
+    else tickAmount = 10;
+  }
+
+  const rotate = veryDense ? -58 : dense ? -50 : -42;
+
+  const labels = {
+    rotate,
+    rotateAlways: true,
+    hideOverlappingLabels: true,
+    style: {
+      colors: "#8b95a8",
+      fontSize: veryDense ? "7px" : dense ? "7.5px" : "8px",
     },
+    maxHeight: veryDense ? 102 : dense ? 92 : 84,
+  };
+
+  const out = {
+    type: "category",
+    categories: cats,
+    labels,
     axisBorder: { show: false },
     axisTicks: { show: false },
   };
+  if (tickAmount != null) {
+    out.tickAmount = tickAmount;
+  }
+  return out;
 }
 
 function detailChartYaxisConfig(yb) {
