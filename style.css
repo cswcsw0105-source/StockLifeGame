@@ -2129,6 +2129,80 @@ body {
   color: var(--text);
 }
 
+/* ----- 실시간 매매 로그 토스트 (우측 상단 스택) ----- */
+.trade-toast-stack {
+  position: fixed;
+  top: calc(10px + env(safe-area-inset-top, 0px));
+  right: calc(10px + env(safe-area-inset-right, 0px));
+  z-index: 999000;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  max-width: min(94vw, 360px);
+  pointer-events: none;
+}
+
+.trade-toast-item {
+  pointer-events: auto;
+  max-width: 100%;
+  padding: 12px 14px 12px 16px;
+  border-radius: 14px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.45;
+  letter-spacing: -0.01em;
+  background: rgba(8, 10, 16, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    0 4px 24px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  opacity: 0;
+  transform: translate3d(28px, -6px, 0) scale(0.98);
+  transition:
+    opacity 0.38s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.trade-toast-item--visible {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+.trade-toast-item--leaving {
+  opacity: 0;
+  transform: translate3d(22px, 0, 0) scale(0.98);
+  transition:
+    opacity 0.32s ease,
+    transform 0.32s ease;
+}
+
+.trade-toast--buy {
+  color: rgba(215, 224, 245, 0.92);
+  border-left: 3px solid rgba(139, 149, 168, 0.55);
+}
+
+.trade-toast--win {
+  color: #ff4b6a;
+  font-weight: 700;
+  border-left: 3px solid rgba(255, 75, 106, 0.75);
+  text-shadow: 0 0 24px rgba(255, 75, 106, 0.22);
+}
+
+.trade-toast--loss {
+  color: #5b9cff;
+  font-weight: 700;
+  border-left: 3px solid rgba(79, 141, 255, 0.75);
+  text-shadow: 0 0 24px rgba(79, 141, 255, 0.2);
+}
+
+.trade-toast--flat {
+  color: rgba(190, 200, 220, 0.9);
+  border-left: 3px solid rgba(160, 170, 195, 0.4);
+}
+
 /* ----- 친구 풀매수/풀매도 토스트 ----- */
 .friend-trade-toast {
   position: fixed;
