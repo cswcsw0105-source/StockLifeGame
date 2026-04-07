@@ -3725,48 +3725,37 @@ function computeDetailChartYBounds(stockId) {
   };
 }
 
-/**
- * 상세 차트 X축 — 기간이 길어질수록 tick 수·회전으로 라벨 겹침 완화
- * (Apex category + tickAmount 조합 — hideOverlappingLabels 병행)
- */
+/** 상세 차트 X축 — 고정 옵션(Apex category + tickAmount 조합 오류 방지) */
 function detailChartXaxisConfig(categories) {
-  const cats = categories || [];
-  const n = cats.length;
-  const dense = n > 14;
-  const veryDense = n > 36;
-
-  let tickAmount;
-  if (n > 12) {
-    if (n > 96) tickAmount = 6;
-    else if (n > 56) tickAmount = 8;
-    else if (n > 28) tickAmount = 9;
-    else tickAmount = 10;
-  }
-
-  const rotate = veryDense ? -58 : dense ? -50 : -42;
-
-  const labels = {
-    rotate,
-    rotateAlways: true,
-    hideOverlappingLabels: true,
-    style: {
-      colors: "#8b95a8",
-      fontSize: veryDense ? "7px" : dense ? "7.5px" : "8px",
-    },
-    maxHeight: veryDense ? 102 : dense ? 92 : 84,
-  };
-
-  const out = {
+  return {
     type: "category",
-    categories: cats,
-    labels,
+    categories: Array.isArray(categories) ? categories : [],
+    tickAmount: 6,
+    labels: {
+      rotate: -45,
+      hideOverlappingLabels: true,
+      style: { colors: "#8b95a8", fontSize: "8px" },
+      maxHeight: 80,
+    },
     axisBorder: { show: false },
     axisTicks: { show: false },
   };
-  if (tickAmount != null) {
-    out.tickAmount = tickAmount;
-  }
-  return out;
+}
+
+/** tickAmount 제외 — 렌더 실패 시 재시도용 */
+function detailChartXaxisConfigFallback(categories) {
+  return {
+    type: "category",
+    categories: Array.isArray(categories) ? categories : [],
+    labels: {
+      rotate: -45,
+      hideOverlappingLabels: true,
+      style: { colors: "#8b95a8", fontSize: "8px" },
+      maxHeight: 80,
+    },
+    axisBorder: { show: false },
+    axisTicks: { show: false },
+  };
 }
 
 function detailChartYaxisConfig(yb) {
@@ -3828,20 +3817,9 @@ function destroyDetailCharts() {
   apexDetail.stockId = null;
 }
 
-function initDetailCharts(stockId) {
-  if (typeof ApexCharts === "undefined") return;
-  const s = getStockById(stockId);
-  if (!s) return;
-
-  const cEl = document.getElementById("apexCandleDetail");
-  const vEl = document.getElementById("apexVolumeDetail");
-  if (!cEl || !vEl) return;
-
-  destroyDetailCharts();
-  cEl.innerHTML = "";
-  vEl.innerHTML = "";
-
-  const { categories, seriesData } = getDetailChartCategoriesAndCandleSeries(stockId);
+/** 주가·거래량 차트 옵션 (xaxis 객체를 주입) */
+function buildDetailChartMainAndVolOpts(stockId, xa) {
+  const { seriesData } = getDetailChartCategoriesAndCandleSeries(stockId);
   const volPts = buildVolumeSeriesData(stockId);
   const volData = volPts.map((p) => ({
     y: p.y,
@@ -3849,7 +3827,6 @@ function initDetailCharts(stockId) {
   }));
   const yb = computeDetailChartYBounds(stockId);
   const ann = buildDetailChartAnnotations(stockId);
-  const xaxisShared = detailChartXaxisConfig(categories);
 
   let mainOpts;
   if (detailChartType === "line") {
@@ -3880,7 +3857,7 @@ function initDetailCharts(stockId) {
         hover: { size: 4 },
       },
       annotations: ann,
-      xaxis: xaxisShared,
+      xaxis: xa,
       yaxis: detailChartYaxisConfig(yb),
     };
   } else {
@@ -3911,7 +3888,7 @@ function initDetailCharts(stockId) {
         },
       },
       annotations: ann,
-      xaxis: xaxisShared,
+      xaxis: xa,
       yaxis: detailChartYaxisConfig(yb),
     };
   }
@@ -3936,13 +3913,33 @@ function initDetailCharts(stockId) {
       },
     },
     xaxis: {
-      ...xaxisShared,
+      ...xa,
       labels: { show: false },
     },
     yaxis: { show: false },
   };
 
-  try {
+  return { mainOpts, volOpts };
+}
+
+function initDetailCharts(stockId) {
+  if (typeof ApexCharts === "undefined") return;
+  const s = getStockById(stockId);
+  if (!s) return;
+
+  const cEl = document.getElementById("apexCandleDetail");
+  const vEl = document.getElementById("apexVolumeDetail");
+  if (!cEl || !vEl) return;
+
+  destroyDetailCharts();
+  cEl.innerHTML = "";
+  vEl.innerHTML = "";
+
+  const { categories } = getDetailChartCategoriesAndCandleSeries(stockId);
+  const xaPrimary = detailChartXaxisConfig(categories);
+
+  const renderPair = (xa) => {
+    const { mainOpts, volOpts } = buildDetailChartMainAndVolOpts(stockId, xa);
     apexDetail.candle = new ApexCharts(cEl, mainOpts);
     apexDetail.vol = new ApexCharts(vEl, volOpts);
     apexDetail.stockId = stockId;
@@ -3950,11 +3947,23 @@ function initDetailCharts(stockId) {
     apexDetail.chartType = detailChartType;
     apexDetail.candle.render();
     apexDetail.vol.render();
+  };
+
+  try {
+    renderPair(xaPrimary);
   } catch (e) {
-    console.warn("initDetailCharts", e);
-    apexDetail.candle = null;
-    apexDetail.vol = null;
-    apexDetail.stockId = null;
+    console.warn("initDetailCharts (primary xaxis)", e?.message || e);
+    try {
+      destroyDetailCharts();
+      cEl.innerHTML = "";
+      vEl.innerHTML = "";
+      renderPair(detailChartXaxisConfigFallback(categories));
+    } catch (e2) {
+      console.warn("initDetailCharts (fallback xaxis)", e2?.message || e2);
+      apexDetail.candle = null;
+      apexDetail.vol = null;
+      apexDetail.stockId = null;
+    }
   }
 }
 
