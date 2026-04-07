@@ -3648,12 +3648,19 @@ function buildVolumeSeriesData(stockId) {
   return rows;
 }
 
-/** X축 `categories`와 동기화하기 위해 캔들 데이터를 y만 담은 형태로 분리 */
+/**
+ * 캔들 시리즈는 ApexCharts에서 `{ x, y: [O,H,L,C] }` 형태가 안정적으로 렌더링됨.
+ * categories는 xaxis와 동일 순서로 유지.
+ */
 function getDetailChartCategoriesAndCandleSeries(stockId) {
   const points = buildCandleSeriesData(stockId);
+  const candleSeriesData = points.map((p) => ({
+    x: String(p.x),
+    y: p.y,
+  }));
   return {
     categories: points.map((p) => String(p.x)),
-    seriesData: points.map((p) => ({ y: p.y })),
+    candleSeriesData,
   };
 }
 
@@ -3819,9 +3826,10 @@ function destroyDetailCharts() {
 
 /** 주가·거래량 차트 옵션 (xaxis 객체를 주입) */
 function buildDetailChartMainAndVolOpts(stockId, xa) {
-  const { seriesData } = getDetailChartCategoriesAndCandleSeries(stockId);
+  const { candleSeriesData } = getDetailChartCategoriesAndCandleSeries(stockId);
   const volPts = buildVolumeSeriesData(stockId);
   const volData = volPts.map((p) => ({
+    x: String(p.x),
     y: p.y,
     fillColor: p.fillColor,
   }));
@@ -3832,7 +3840,10 @@ function buildDetailChartMainAndVolOpts(stockId, xa) {
   if (detailChartType === "line") {
     const linePts = buildLineSeriesData(stockId);
     const lineColor = detailLineStrokeColor(stockId);
-    const lineNums = linePts.map((p) => p.y);
+    const lineData = linePts.map((p) => ({
+      x: String(p.x),
+      y: p.y,
+    }));
     const lineBase = apexCommonChartOpts(210, "line");
     mainOpts = {
       ...lineBase,
@@ -3846,7 +3857,7 @@ function buildDetailChartMainAndVolOpts(stockId, xa) {
         },
       },
       colors: [lineColor],
-      series: [{ name: stockId, data: lineNums }],
+      series: [{ name: stockId, data: lineData }],
       stroke: {
         width: 2.5,
         curve: "smooth",
@@ -3873,7 +3884,7 @@ function buildDetailChartMainAndVolOpts(stockId, xa) {
           dynamicAnimation: { enabled: true, speed: 260 },
         },
       },
-      series: [{ name: stockId, data: seriesData }],
+      series: [{ name: stockId, data: candleSeriesData }],
       stroke: {
         width: [1.15],
         lineCap: "round",
@@ -3970,9 +3981,10 @@ function initDetailCharts(stockId) {
 function refreshDetailChart() {
   if (!selectedStockId || !apexDetail.candle || !apexDetail.vol) return;
   const id = selectedStockId;
-  const { categories, seriesData } = getDetailChartCategoriesAndCandleSeries(id);
+  const { categories, candleSeriesData } = getDetailChartCategoriesAndCandleSeries(id);
   const volPts = buildVolumeSeriesData(id);
   const volData = volPts.map((p) => ({
+    x: String(p.x),
     y: p.y,
     fillColor: p.fillColor,
   }));
@@ -3984,10 +3996,11 @@ function refreshDetailChart() {
     if (detailChartType === "line") {
       const linePts = buildLineSeriesData(id);
       const lineColor = detailLineStrokeColor(id);
-      apexDetail.candle.updateSeries(
-        [{ name: id, data: linePts.map((p) => p.y) }],
-        true
-      );
+      const lineData = linePts.map((p) => ({
+        x: String(p.x),
+        y: p.y,
+      }));
+      apexDetail.candle.updateSeries([{ name: id, data: lineData }], true);
       apexDetail.candle.updateOptions(
         {
           colors: [lineColor],
@@ -4004,7 +4017,7 @@ function refreshDetailChart() {
         true
       );
     } else {
-      apexDetail.candle.updateSeries([{ name: id, data: seriesData }], true);
+      apexDetail.candle.updateSeries([{ name: id, data: candleSeriesData }], true);
       apexDetail.candle.updateOptions(
         {
           xaxis: xaxisShared,
