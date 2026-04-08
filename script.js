@@ -3960,11 +3960,11 @@ function buildVolumeSeriesData(stockId) {
 function getDetailChartCategoriesAndCandleSeries(stockId) {
   const points = buildCandleSeriesData(stockId);
   const candleSeriesData = points.map((p) => ({
-    x: Number(p.x),
+    x: detailChartDatetimeFormatter(p.x),
     y: p.y,
   }));
   return {
-    categories: points.map((p) => Number(p.x)),
+    categories: points.map((p) => detailChartDatetimeFormatter(p.x)),
     candleSeriesData,
   };
 }
@@ -3973,10 +3973,10 @@ function getDetailChartCategoriesAndCandleSeries(stockId) {
 function buildLineSeriesData(stockId) {
   if (delistedStocks[stockId]) return [];
   const rows = buildPreparedDetailRows(stockId).map((r) => ({
-    x: r.x,
+    x: detailChartDatetimeFormatter(r.x),
     y: Math.floor(r.c),
   }));
-  return rows.filter((p) => Number.isFinite(Number(p.x)) && Number.isFinite(Number(p.y)));
+  return rows.filter((p) => typeof p.x === "string" && Number.isFinite(Number(p.y)));
 }
 
 function detailLineStrokeColor(stockId) {
@@ -4034,14 +4034,15 @@ function detailChartDatetimeFormatter(value) {
   return `${mm}/${dd} ${hh}:${mi}`;
 }
 
-function detailChartXaxisConfig() {
+function detailChartXaxisConfig(categories) {
   return {
-    type: "datetime",
+    type: "category",
+    categories: Array.isArray(categories) ? categories : [],
     tickAmount: 6,
+    tickPlacement: "on",
     labels: {
       rotate: -45,
       hideOverlappingLabels: true,
-      formatter: detailChartDatetimeFormatter,
       style: { colors: "#8b95a8", fontSize: "8px" },
       maxHeight: 80,
     },
@@ -4051,13 +4052,14 @@ function detailChartXaxisConfig() {
 }
 
 /** tickAmount 제외 — 렌더 실패 시 재시도용 */
-function detailChartXaxisConfigFallback() {
+function detailChartXaxisConfigFallback(categories) {
   return {
-    type: "datetime",
+    type: "category",
+    categories: Array.isArray(categories) ? categories : [],
+    tickPlacement: "on",
     labels: {
       rotate: -45,
       hideOverlappingLabels: true,
-      formatter: detailChartDatetimeFormatter,
       style: { colors: "#8b95a8", fontSize: "8px" },
       maxHeight: 80,
     },
@@ -4130,7 +4132,7 @@ function buildDetailChartMainAndVolOpts(stockId, xa) {
   const { candleSeriesData } = getDetailChartCategoriesAndCandleSeries(stockId);
   const volPts = buildVolumeSeriesData(stockId);
   const volData = volPts.map((p) => ({
-    x: Number(p.x),
+    x: detailChartDatetimeFormatter(p.x),
     y: p.y,
     fillColor: p.fillColor,
   }));
@@ -4142,7 +4144,7 @@ function buildDetailChartMainAndVolOpts(stockId, xa) {
     const linePts = buildLineSeriesData(stockId);
     const lineColor = detailLineStrokeColor(stockId);
     const lineData = linePts.map((p) => ({
-      x: Number(p.x),
+      x: p.x,
       y: p.y,
     }));
     const lineBase = apexCommonChartOpts(210, "line");
@@ -4254,7 +4256,8 @@ function initDetailCharts(stockId) {
   cEl.innerHTML = "";
   vEl.innerHTML = "";
 
-  const xaPrimary = detailChartXaxisConfig();
+  const { categories } = getDetailChartCategoriesAndCandleSeries(stockId);
+  const xaPrimary = detailChartXaxisConfig(categories);
 
   const renderPair = (xa) => {
     const { mainOpts, volOpts } = buildDetailChartMainAndVolOpts(stockId, xa);
@@ -4275,7 +4278,7 @@ function initDetailCharts(stockId) {
       destroyDetailCharts();
       cEl.innerHTML = "";
       vEl.innerHTML = "";
-      renderPair(detailChartXaxisConfigFallback());
+      renderPair(detailChartXaxisConfigFallback(categories));
     } catch (e2) {
       console.warn("initDetailCharts (fallback xaxis)", e2?.message || e2);
       apexDetail.candle = null;
@@ -4289,23 +4292,23 @@ function refreshDetailChart() {
   if (!selectedStockId || !apexDetail.candle || !apexDetail.vol) return;
   const id = selectedStockId;
   if (delistedStocks[id]) return;
-  const { candleSeriesData } = getDetailChartCategoriesAndCandleSeries(id);
+  const { categories, candleSeriesData } = getDetailChartCategoriesAndCandleSeries(id);
   const volPts = buildVolumeSeriesData(id);
   const volData = volPts.map((p) => ({
-    x: Number(p.x),
+    x: detailChartDatetimeFormatter(p.x),
     y: p.y,
     fillColor: p.fillColor,
   }));
   const yb = computeDetailChartYBounds(id);
   const ann = buildDetailChartAnnotations(id);
-  const xaxisShared = detailChartXaxisConfig();
+  const xaxisShared = detailChartXaxisConfig(categories);
 
   try {
     if (detailChartType === "line") {
       const linePts = buildLineSeriesData(id);
       const lineColor = detailLineStrokeColor(id);
       const lineData = linePts.map((p) => ({
-        x: Number(p.x),
+        x: p.x,
         y: p.y,
       }));
       apexDetail.candle.updateSeries([{ name: id, data: lineData }], true);
