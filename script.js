@@ -5842,6 +5842,85 @@ function tickStockPrices() {
   renderAssetSummary();
 }
 
+async function runSeason2HardReset() {
+  clearGameClockTimer();
+  clearAmbientNewsTimer();
+  clearMarketClientTick();
+
+  gameDayIndex = 0;
+  gameMinutes = MARKET_OPEN_MIN;
+  awaitingDayRoll = false;
+  isMarketClosed = false;
+  openingGapAppliedToday = true;
+  openingGapBlendByStock = {};
+  premarketNewsCounts = emptyPremarketNewsCounts();
+  premarketNewsScheduleByMin = {};
+  afterHoursNewsCounts = emptyPremarketNewsCounts();
+  afterHoursNewsScheduleByMin = {};
+  afterHoursPlanGeneratedToday = false;
+  pendingOrders = [];
+  scheduledEvents = buildInitialCalendar();
+  ensureCalendarHorizon();
+
+  game.cash = 1_000_000;
+  game.initialCapital = 1_000_000;
+  game.holdings = {};
+  game.costBasis = {};
+  STOCK_SPECS.forEach((spec) => {
+    game.holdings[spec.id] = 0;
+    game.costBasis[spec.id] = 0;
+    virtualTraderHoldingsByStock[spec.id] = 0;
+    executionFlowByStock[spec.id] = { buyVol: 1, sellVol: 1 };
+  });
+
+  stocks.forEach((s) => {
+    const spec = stockSpecById(s.id);
+    s.price = Math.max(0, Math.floor(Number(spec?.price) || 100));
+    delistedStocks[s.id] = false;
+    delete pendingRelistingByStock[s.id];
+  });
+
+  resetNewsSpikeState();
+  resetDailyNewsState();
+  clearCandleHistory();
+  snapshotSessionOpen();
+  renderPendingOrdersUi();
+
+  const msg =
+    "🚨 [긴급] 경제 대공황으로 인한 화폐 개혁 실시! 모든 자산이 100만 원으로 재설정되었습니다. 시즌 2 시작!";
+  addNewsItem(msg, "calendar", "", { global: true });
+  setMessage(msg, "ok");
+
+  if (onlineMode && sb && loginDisplayName) {
+    try {
+      await sb.rpc("reset_name_progress", { p_login_name: loginDisplayName });
+      await loadUserFromServer();
+      STOCK_SPECS.forEach((spec) => {
+        game.holdings[spec.id] = 0;
+        game.costBasis[spec.id] = 0;
+      });
+      game.cash = 1_000_000;
+      game.initialCapital = 1_000_000;
+    } catch (e) {
+      console.warn("runSeason2HardReset rpc", e);
+    }
+  }
+
+  renderDateTimeLine();
+  renderCalendarUI();
+  renderStockListMain();
+  renderStocks();
+  renderAssetSummary();
+  updateDetailPriceLine();
+  if (selectedStockId) {
+    refreshDetailChart();
+    updateOrderBookAndStrength(selectedStockId);
+  }
+  syncTradeButtons();
+  schedulePersistUser();
+  flushPersistUser();
+}
+
 function initNewGame() {
   gameDayIndex = 0;
   gameMinutes = MARKET_OPEN_MIN;
@@ -5954,6 +6033,8 @@ async function runGameBootstrap() {
 
 async function init() {
   bindToastUiOnce();
+  window.season2HardReset = () =>
+    runSeason2HardReset().catch((e) => console.error("season2HardReset", e));
   const showLoginError = (msg) => {
     const el = document.getElementById("loginGateError");
     if (!el) return;
