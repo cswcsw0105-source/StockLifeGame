@@ -2625,6 +2625,89 @@ body {
   min-height: 0;
 }
 
+.bank-section,
+.flex-shop-section {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.18);
+  padding: 12px 12px 14px;
+}
+
+.bank-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.bank-kpi {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(12, 16, 24, 0.85);
+  padding: 8px 9px;
+}
+
+.bank-kpi-label {
+  display: block;
+  font-size: 0.62rem;
+  color: var(--text-dim);
+}
+
+.bank-kpi-value {
+  display: block;
+  margin-top: 3px;
+  font-size: 0.82rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.bank-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.bank-amount-input {
+  width: 100%;
+  grid-column: 1 / -1;
+  min-height: 42px;
+}
+
+.flex-shop-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.flex-shop-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(10, 14, 22, 0.85);
+  padding: 8px 10px;
+}
+
+.flex-shop-name {
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.flex-shop-price {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+}
+
+.mp-leader-flex-badge {
+  margin-left: 6px;
+  font-size: 0.9em;
+}
+
 .mp-feed-list {
   list-style: none;
   margin: 0;
