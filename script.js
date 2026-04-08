@@ -22,9 +22,11 @@ const TBL_TRADE_LOGS = "trade_logs";
 
 /** 온보딩 튜토리얼 1회 완료 플래그 (브라우저 로컬) */
 const LS_TUTORIAL_DONE_KEY = "stockLifeTutorialV1Done";
+const LS_STARTING_FUND_GUARD_PREFIX = "stockLifeStartingFundGuard:";
 
 /** 튜토리얼 표시 중: 시계·로컬 생활 로직 정지, 시세 Realtime만 수신 */
 let tutorialGateActive = false;
+let isUserDataLoaded = false;
 
 const MAX_NEWS_ITEMS = 48;
 /** 찌라시 비율 — 화면에만 표시, 시세·페이로드(체이닝 impact 등) 반영 없음. 갭·프리마켓 카운트 로직은 변경하지 않음 */
@@ -160,6 +162,8 @@ let playerProfile = {
   lastSalaryMonthKey: "",
   /** 고배당 리츠 월별 배당(1일 1회) */
   lastReitDivMonthKey: "",
+  /** 초기 자금 지급 완료(중복 지급 방지) */
+  hasReceivedStartingFund: false,
 };
 
 let gameClockEverStarted = false;
@@ -521,6 +525,26 @@ function clearSessionName() {
   loginDisplayName = null;
 }
 
+function startingFundGuardKey(nm) {
+  return `${LS_STARTING_FUND_GUARD_PREFIX}${nm}`;
+}
+
+function readStartingFundGuard(nm) {
+  try {
+    return localStorage.getItem(startingFundGuardKey(nm)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeStartingFundGuard(nm) {
+  try {
+    localStorage.setItem(startingFundGuardKey(nm), "1");
+  } catch {
+    /* ignore */
+  }
+}
+
 const game = {
   age: 25,
   cash: INITIAL_CAPITAL,
@@ -796,6 +820,7 @@ function ensureTradeLockPolling() {
 }
 
 function maybeApplyMonthlySalary() {
+  if (!isUserDataLoaded) return;
   const { day } = getCalendarParts(gameDayIndex);
   const ctx = getMonthContextForDayIndex(gameDayIndex);
   const mk = ctx.monthKey;
@@ -1102,7 +1127,7 @@ async function loginOrRegisterPlayer(rawName) {
       sim_age: 25,
       trade_blocked_until_ms: 0,
       initial_capital: INITIAL_CAPITAL,
-      profile: {},
+      profile: { hasReceivedStartingFund: true },
     });
     if (insErr) {
       if (insErr.code !== "23505") {
@@ -1112,6 +1137,7 @@ async function loginOrRegisterPlayer(rawName) {
   }
 
   saveSessionName(nm);
+  writeStartingFundGuard(nm);
   await loadUserFromServer();
   return { ok: true };
 }
@@ -1133,15 +1159,59 @@ async function ensureUserRowExists(nm) {
     sim_age: 25,
     trade_blocked_until_ms: 0,
     initial_capital: INITIAL_CAPITAL,
-    profile: {},
+    profile: { hasReceivedStartingFund: true },
   });
   if (error && error.code !== "23505") {
     console.warn("ensureUserRowExists", error);
   }
 }
 
+async function ensureStartingFundGuardOnce(row, nm) {
+  if (!row || !nm || !sb) return row;
+  const prof = row.profile && typeof row.profile === "object" ? row.profile : {};
+  const dbFlag = prof.hasReceivedStartingFund === true;
+  const lsFlag = readStartingFundGuard(nm);
+  const cashNum = Number(row.cash);
+  const hasPositiveCash = Number.isFinite(cashNum) && cashNum > 0;
+
+  if (hasPositiveCash) {
+    if (!dbFlag) {
+      const nextProfile = { ...prof, hasReceivedStartingFund: true };
+      await sb
+        .from(TBL_USERS)
+        .update({ profile: nextProfile, updated_at: new Date().toISOString() })
+        .eq("login_name", nm);
+      row.profile = nextProfile;
+    }
+    writeStartingFundGuard(nm);
+    return row;
+  }
+
+  if (dbFlag || lsFlag) {
+    writeStartingFundGuard(nm);
+    return row;
+  }
+
+  const nextProfile = { ...prof, hasReceivedStartingFund: true };
+  await sb
+    .from(TBL_USERS)
+    .update({
+      cash: INITIAL_CAPITAL,
+      initial_capital: Number(row.initial_capital) || INITIAL_CAPITAL,
+      profile: nextProfile,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("login_name", nm);
+  row.cash = INITIAL_CAPITAL;
+  row.initial_capital = Number(row.initial_capital) || INITIAL_CAPITAL;
+  row.profile = nextProfile;
+  writeStartingFundGuard(nm);
+  return row;
+}
+
 async function loadUserFromServer() {
   if (!sb || !loginDisplayName) return;
+  isUserDataLoaded = false;
   const nm = loginDisplayName;
   let { data: row, error } = await sb
     .from(TBL_USERS)
@@ -1168,6 +1238,7 @@ async function loadUserFromServer() {
     console.warn("loadUserFromServer: users 행 없음", nm);
     return;
   }
+  row = await ensureStartingFundGuardOnce(row, nm);
   game.age = row.sim_age ?? 25;
   game.cash = Number(row.cash);
   game.initialCapital = Number(row.initial_capital) || INITIAL_CAPITAL;
@@ -1186,6 +1257,7 @@ async function loadUserFromServer() {
   }
   playerProfile.lastReitDivMonthKey =
     typeof prof.lastReitDivMonthKey === "string" ? prof.lastReitDivMonthKey : "";
+  playerProfile.hasReceivedStartingFund = prof.hasReceivedStartingFund === true;
   pendingOrders = Array.isArray(prof.pendingOrders)
     ? prof.pendingOrders.filter(
         (o) =>
@@ -1225,8 +1297,8 @@ async function loadUserFromServer() {
   renderPlayerLoginBadge();
   renderJobScheduleUi();
   ensureTradeLockPolling();
-  maybeApplyMonthlySalary();
   renderNewsFeedFromServer(serverNewsFeedItems);
+  isUserDataLoaded = true;
 }
 
 function maybePayDividendFromServerTick(prev, next) {
@@ -2001,6 +2073,7 @@ async function persistUserNow() {
         age: playerProfile.age,
         birthday: playerProfile.birthday,
         setupComplete: playerProfile.setupComplete,
+        hasReceivedStartingFund: playerProfile.hasReceivedStartingFund === true,
         watchlist: watchlistIds.slice(0, MAX_WATCHLIST_IDS),
         lastSalaryMonthKey: playerProfile.lastSalaryMonthKey || "",
         lastReitDivMonthKey: playerProfile.lastReitDivMonthKey || "",
@@ -5864,6 +5937,8 @@ async function runSeason2HardReset() {
 
   game.cash = 1_000_000;
   game.initialCapital = 1_000_000;
+  playerProfile.hasReceivedStartingFund = true;
+  if (loginDisplayName) writeStartingFundGuard(loginDisplayName);
   game.holdings = {};
   game.costBasis = {};
   STOCK_SPECS.forEach((spec) => {
@@ -5922,6 +5997,7 @@ async function runSeason2HardReset() {
 }
 
 function initNewGame() {
+  isUserDataLoaded = false;
   gameDayIndex = 0;
   gameMinutes = MARKET_OPEN_MIN;
   awaitingDayRoll = false;
