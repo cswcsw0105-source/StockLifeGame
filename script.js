@@ -555,6 +555,9 @@ let openingGapBlendByStock = {};
 let newsCountByStock = emptyChainState();
 /** 체이닝 다음 스텝 인덱스 */
 let chainStepByStock = emptyChainState();
+/** 체결강도(100명 가상 유저 틱) */
+const VIRTUAL_TRADER_COUNT = 100;
+const executionFlowByStock = {};
 
 const stocks = STOCK_SPECS.map((spec) => ({
   ...spec,
@@ -683,9 +686,6 @@ const DETAIL_CHART_AGG_FACTOR_BY_RANGE = {
   all: 8, // 80분봉
 };
 
-/** 체결강도(100명 가상 유저 틱) */
-const VIRTUAL_TRADER_COUNT = 100;
-const executionFlowByStock = {};
 /** 상세 차트: candle | line */
 let detailChartType = "candle";
 /** 종목 상세 현재가 표시 직전 가격(틱 애니메이션) */
