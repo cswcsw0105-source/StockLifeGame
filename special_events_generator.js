@@ -93,7 +93,8 @@ function renderTemplate(str, vars) {
     .replaceAll("{CompanyA}", vars.companyA)
     .replaceAll("{CompanyB}", vars.companyB)
     .replaceAll("{KeywordA}", vars.keywordA)
-    .replaceAll("{KeywordB}", vars.keywordB);
+    .replaceAll("{KeywordB}", vars.keywordB)
+    .replaceAll("{Singer}", vars.singer || "초특급 스타");
 }
 
 function buildImpacts(mode, aId, bId) {
@@ -123,6 +124,11 @@ function buildImpacts(mode, aId, bId) {
         [aId]: randomPct(0.26, 0.38, -1),
         [bId]: randomPct(0.26, 0.38, -1),
       };
+    case "both-up-jackpot":
+      return {
+        [aId]: randomPct(1.0, 1.5, 1),
+        [bId]: randomPct(1.0, 1.5, 1),
+      };
     default:
       return {
         [aId]: randomPct(0.12, 0.2, 1),
@@ -137,6 +143,14 @@ export const DEFAULT_SPECIAL_EVENT_CONFIG = {
   rumorTemplates: SINGLE_RUMOR_TEMPLATES,
   triggerChancePerCall: 0.2,
   comboChance: 0.68,
+  jackpotWaveChance: 0.28,
+  jackpotSingers: [
+    "지디",
+    "아이유",
+    "뉴진스 민지",
+    "에스파 카리나",
+    "임영웅",
+  ],
 };
 
 export function createSpecialEventsGenerator(config = DEFAULT_SPECIAL_EVENT_CONFIG) {
@@ -201,9 +215,24 @@ export function createSpecialEventsGenerator(config = DEFAULT_SPECIAL_EVENT_CONF
         companyB: b?.name || bId,
         keywordA,
         keywordB,
+        singer: pick(config.jackpotSingers || ["월드스타"]),
       };
-      state.activeCombo = { aId, bId, vars, template, stepIdx: 1 };
-      const first = template.steps[0];
+      const templateSteps = template.steps.map((s) => ({ ...s }));
+      if (
+        templateSteps.length >= 2 &&
+        (templateSteps[1].impactMode || "").startsWith("both-down") &&
+        Math.random() < (config.jackpotWaveChance ?? 0.28)
+      ) {
+        templateSteps[1] = {
+          ...templateSteps[1],
+          tone: "good",
+          text: "🔥 [특보] {CompanyA} x {CompanyB} 제품, 빌보드 스타 {Singer}가 착용하며 전 세계 품절 대란! 물 들어올 때 노 젓는다!",
+          impactMode: "both-up-jackpot",
+        };
+      }
+      const templateResolved = { ...template, steps: templateSteps };
+      state.activeCombo = { aId, bId, vars, template: templateResolved, stepIdx: 1 };
+      const first = templateResolved.steps[0];
       return {
         headline: renderTemplate(first.text, vars),
         impacts: buildImpacts(first.impactMode, aId, bId),
