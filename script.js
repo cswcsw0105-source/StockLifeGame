@@ -164,6 +164,8 @@ let playerProfile = {
   lastReitDivMonthKey: "",
   /** 초기 자금 지급 완료(중복 지급 방지) */
   hasReceivedStartingFund: false,
+  /** 전일 마감 기준 총자산(현금+평가) */
+  previousDayTotalAssets: INITIAL_CAPITAL,
 };
 
 let gameClockEverStarted = false;
@@ -837,6 +839,18 @@ function maybeApplyMonthlySalary() {
   maybeApplyReitMonthlyDividend();
 }
 
+function ensurePreviousDayAssetsBase() {
+  const v = Number(playerProfile.previousDayTotalAssets);
+  if (Number.isFinite(v) && v > 0) return v;
+  return INITIAL_CAPITAL;
+}
+
+function snapshotPreviousDayTotalAssets() {
+  const nw = netWorth();
+  playerProfile.previousDayTotalAssets = Math.max(0, Math.floor(Number(nw) || 0));
+  schedulePersistUser();
+}
+
 const REIT_MONTHLY_DIVIDEND_RATE = 0.03;
 
 function maybeApplyReitMonthlyDividend() {
@@ -1258,6 +1272,9 @@ async function loadUserFromServer() {
   playerProfile.lastReitDivMonthKey =
     typeof prof.lastReitDivMonthKey === "string" ? prof.lastReitDivMonthKey : "";
   playerProfile.hasReceivedStartingFund = prof.hasReceivedStartingFund === true;
+  playerProfile.previousDayTotalAssets = Number.isFinite(Number(prof.previousDayTotalAssets))
+    ? Math.max(0, Math.floor(Number(prof.previousDayTotalAssets)))
+    : INITIAL_CAPITAL;
   pendingOrders = Array.isArray(prof.pendingOrders)
     ? prof.pendingOrders.filter(
         (o) =>
@@ -1831,12 +1848,14 @@ function closeMarketOnline() {
   if (tickInCandle > 0) {
     sealCurrentCandleAndReset();
   }
+  snapshotPreviousDayTotalAssets();
   awaitingDayRoll = true;
   isMarketClosed = true;
   gameMinutes = MARKET_CLOSE_MIN;
   addNewsItem("장 마감 — 오늘의 거래가 종료되었습니다.", "close", "", {
     global: true,
   });
+  schedulePersistUser();
 }
 
 function openNextTradingDayOnline() {
@@ -2074,6 +2093,10 @@ async function persistUserNow() {
         birthday: playerProfile.birthday,
         setupComplete: playerProfile.setupComplete,
         hasReceivedStartingFund: playerProfile.hasReceivedStartingFund === true,
+        previousDayTotalAssets: Math.max(
+          0,
+          Math.floor(Number(playerProfile.previousDayTotalAssets) || 0)
+        ),
         watchlist: watchlistIds.slice(0, MAX_WATCHLIST_IDS),
         lastSalaryMonthKey: playerProfile.lastSalaryMonthKey || "",
         lastReitDivMonthKey: playerProfile.lastReitDivMonthKey || "",
@@ -5425,9 +5448,11 @@ function refreshPortfolioTableCells() {
 
 function renderAssetSummary() {
   const nw = netWorth();
-  const base = game.initialCapital ?? INITIAL_CAPITAL;
-  const totalPl = nw - base;
-  const totalPlPct = base !== 0 ? (totalPl / base) * 100 : 0;
+  const prevBase = ensurePreviousDayAssetsBase();
+  const dayPl = nw - prevBase;
+  const dayPlPct = prevBase > 0 ? (dayPl / prevBase) * 100 : 0;
+  const cumBase = game.initialCapital ?? INITIAL_CAPITAL;
+  const cumPlPct = cumBase > 0 ? ((nw - cumBase) / cumBase) * 100 : 0;
 
   const profitEl = document.getElementById("summaryProfit");
   const pctEl = document.getElementById("summaryProfitPct");
@@ -5445,15 +5470,15 @@ function renderAssetSummary() {
     );
 
   if (profitEl && pctEl) {
-    profitEl.textContent = `${totalPl >= 0 ? "+" : ""}${formatWon(totalPl)}`;
-    pctEl.textContent = `(${totalPlPct >= 0 ? "+" : ""}${totalPlPct.toFixed(
+    profitEl.textContent = `${dayPl >= 0 ? "+" : ""}${formatWon(dayPl)}`;
+    pctEl.textContent = `(${dayPlPct >= 0 ? "+" : ""}${dayPlPct.toFixed(
       2
-    )}%)`;
+    )}% · 누적 ${cumPlPct >= 0 ? "+" : ""}${cumPlPct.toFixed(2)}%)`;
     profitEl.className = `asset-sub ${
-      totalPl > 0 ? "value-up" : totalPl < 0 ? "value-down" : "value-neutral"
+      dayPl > 0 ? "value-up" : dayPl < 0 ? "value-down" : "value-neutral"
     }`;
     pctEl.className = `asset-pct ${
-      totalPl > 0 ? "value-up" : totalPl < 0 ? "value-down" : "value-neutral"
+      dayPl > 0 ? "value-up" : dayPl < 0 ? "value-down" : "value-neutral"
     }`;
   }
 
@@ -5705,6 +5730,7 @@ function closeMarket() {
   if (tickInCandle > 0) {
     sealCurrentCandleAndReset();
   }
+  snapshotPreviousDayTotalAssets();
 
   awaitingDayRoll = true;
   isMarketClosed = true;
@@ -5938,6 +5964,7 @@ async function runSeason2HardReset() {
   game.cash = 1_000_000;
   game.initialCapital = 1_000_000;
   playerProfile.hasReceivedStartingFund = true;
+  playerProfile.previousDayTotalAssets = 1_000_000;
   if (loginDisplayName) writeStartingFundGuard(loginDisplayName);
   game.holdings = {};
   game.costBasis = {};
@@ -6019,6 +6046,7 @@ function initNewGame() {
   game.costBasis = {};
   game.initialCapital = INITIAL_CAPITAL;
   game.tradeBlockedUntilMs = 0;
+  playerProfile.previousDayTotalAssets = INITIAL_CAPITAL;
   playerProfile.lastSalaryMonthKey =
     getMonthContextForDayIndex(gameDayIndex).monthKey;
 

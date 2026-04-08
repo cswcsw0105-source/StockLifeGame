@@ -9,6 +9,8 @@ const DEFAULT_KEYWORD_POOLS = {
   SWB: ["B2B 메신저", "업무 자동화 봇", "퇴근 가속 버튼", "클라우드 결재 엔진"],
 };
 
+const MEDIA_NAMES = ["KBS", "MBC", "SBS", "JTBC", "YTN", "연합뉴스"];
+
 const COMBO_TEMPLATES = [
   {
     id: "launch-crash-rebound",
@@ -65,13 +67,13 @@ const COMBO_TEMPLATES = [
 
 const SINGLE_RUMOR_TEMPLATES = [
   {
-    text: "🧪 [B급 루머] {CompanyA}, '{KeywordA}' 기술이 사실은 중고장터 재조립품 논란",
+    text: "{CompanyA}, '{KeywordA}' 기술이 사실은 중고장터 재조립품 논란",
     tone: "bad",
     min: 0.18,
     max: 0.32,
   },
   {
-    text: "🧪 [B급 루머] {CompanyA}, '{KeywordA}'가 해외 밈 커뮤니티에서 신의 기술로 등극",
+    text: "{CompanyA}, '{KeywordA}'가 해외 밈 커뮤니티에서 신의 기술로 등극",
     tone: "good",
     min: 0.22,
     max: 0.42,
@@ -95,6 +97,13 @@ function renderTemplate(str, vars) {
     .replaceAll("{KeywordA}", vars.keywordA)
     .replaceAll("{KeywordB}", vars.keywordB)
     .replaceAll("{Singer}", vars.singer || "초특급 스타");
+}
+
+function randomMediaPrefix(mediaNames) {
+  const m = pick(mediaNames);
+  if (m === "연합뉴스") return `[${m} 속보]`;
+  if (Math.random() < 0.5) return `[${m} 단독]`;
+  return `[${m} 뉴스]`;
 }
 
 function buildImpacts(mode, aId, bId) {
@@ -139,6 +148,7 @@ function buildImpacts(mode, aId, bId) {
 
 export const DEFAULT_SPECIAL_EVENT_CONFIG = {
   keywordPools: DEFAULT_KEYWORD_POOLS,
+  mediaNames: MEDIA_NAMES,
   comboTemplates: COMBO_TEMPLATES,
   rumorTemplates: SINGLE_RUMOR_TEMPLATES,
   triggerChancePerCall: 0.2,
@@ -254,10 +264,12 @@ export function createSpecialEventsGenerator(config = DEFAULT_SPECIAL_EVENT_CONF
       keywordA,
       keywordB: "",
     });
+    const mediaPrefix = randomMediaPrefix(config.mediaNames || MEDIA_NAMES);
+    const rumorHeadline = `${mediaPrefix} ${headline}`;
     const sign = rumor.tone === "good" ? 1 : -1;
     const pct = randomPct(rumor.min ?? 0.15, rumor.max ?? 0.3, sign);
     return {
-      headline,
+      headline: rumorHeadline,
       impacts: { [aId]: pct },
       primaryStockId: aId,
       feedType: "ambient",
