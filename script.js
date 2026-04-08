@@ -198,6 +198,8 @@ const pendingRelistingByStock = {};
 const RELIST_WAIT_MS = 5 * 60 * 1000;
 const RELIST_ALERT_BEFORE_MS = 60 * 1000;
 const RELIST_BASE_PRICE = 100;
+/** 100명 가상 유저 종목별 잔고(시뮬레이션) */
+const virtualTraderHoldingsByStock = {};
 
 function clampSafeInteger(n, fallback = 0) {
   const v = Number(n);
@@ -229,6 +231,43 @@ function repairInvalidStockPrices() {
   }
 }
 
+async function syncDelistedPortfolioToServer(stockId) {
+  if (!onlineMode || !sb || !loginDisplayName) return;
+  try {
+    await sb
+      .from(TBL_PORTFOLIOS)
+      .upsert(
+        {
+          login_name: loginDisplayName,
+          symbol: stockId,
+          shares: 0,
+          avg_cost: 0,
+        },
+        { onConflict: "login_name,symbol" }
+      );
+  } catch (e) {
+    console.warn("syncDelistedPortfolioToServer", e);
+  }
+}
+
+function burnDelistedShares(stockId, opts = {}) {
+  const silent = opts.silent === true;
+  const syncServer = opts.syncServer !== false;
+  const heldBefore = Math.max(0, Math.floor(Number(game.holdings[stockId] ?? 0)));
+  game.holdings[stockId] = 0;
+  game.costBasis[stockId] = 0;
+  virtualTraderHoldingsByStock[stockId] = 0;
+  if (!silent && heldBefore > 0) {
+    const nm = getStockById(stockId)?.name || stockId;
+    const msg = `🚨 [상장폐지] 보유 중이던 ${nm} 주식이 휴짓조각이 되어 전량 소각되었습니다.`;
+    addNewsItem(msg, "calendar", "", { stockId, global: true });
+    setMessage(msg, "err");
+  }
+  if (syncServer) {
+    void syncDelistedPortfolioToServer(stockId);
+  }
+}
+
 function markStockDelisted(stockId) {
   if (!stockId || delistedStocks[stockId]) return;
   delistedStocks[stockId] = true;
@@ -240,8 +279,7 @@ function markStockDelisted(stockId) {
   };
   const st = getStockById(stockId);
   if (st) st.price = 0;
-  game.holdings[stockId] = 0;
-  game.costBasis[stockId] = 0;
+  burnDelistedShares(stockId);
   if (Array.isArray(pendingOrders) && pendingOrders.length > 0) {
     pendingOrders = pendingOrders.filter((o) => o.symbol !== stockId);
     renderPendingOrdersUi();
@@ -259,6 +297,7 @@ function executeRelisting(stockId) {
   delete pendingRelistingByStock[stockId];
 
   st.price = RELIST_BASE_PRICE;
+  burnDelistedShares(stockId);
   sessionOpenPrice[stockId] = RELIST_BASE_PRICE;
   prevTickPrice[stockId] = RELIST_BASE_PRICE;
   candleHistory[stockId] = [];
@@ -678,12 +717,12 @@ const DETAIL_CHART_MAX_POINTS = {
   all: 1800,
 };
 const DETAIL_CHART_SAMPLE_MAX_POINTS = 120;
-const DETAIL_CHART_AGG_FACTOR_BY_RANGE = {
-  d1: 1,
-  d5: 2, // 20분봉
-  w1: 3, // 30분봉
-  m1: 6, // 60분봉
-  all: 8, // 80분봉
+const DETAIL_CHART_BUCKET_MINUTES_BY_RANGE = {
+  d1: 10, // 10분봉(원본)
+  d5: 30,
+  w1: 60,
+  m1: 240,
+  all: 480,
 };
 
 /** 상세 차트: candle | line */
@@ -693,6 +732,8 @@ let detailLastShownPrice = null;
 
 /** 관심 종목 티커 — 뉴스 가중치에 사용 */
 let watchlistIds = [];
+/** 시장 리스트 필터: all | mine */
+let marketListFilterMode = "all";
 
 function GAME_ANCHOR_DATE() {
   return new Date(2000, 3, 1);
@@ -1174,6 +1215,7 @@ async function loadUserFromServer() {
     game.costBasis[spec.id] = 0;
     delistedStocks[spec.id] = false;
     delete pendingRelistingByStock[spec.id];
+    virtualTraderHoldingsByStock[spec.id] = 0;
     executionFlowByStock[spec.id] = { buyVol: 1, sellVol: 1 };
   });
   (ports || []).forEach((p) => {
@@ -1400,8 +1442,7 @@ function applyServerMarketState(m) {
       s.price = clampStockPrice(px);
       delistedStocks[spec.id] = s.price <= 0;
       if (delistedStocks[spec.id]) {
-        game.holdings[spec.id] = 0;
-        game.costBasis[spec.id] = 0;
+        burnDelistedShares(spec.id, { silent: true, syncServer: false });
         if (!pendingRelistingByStock[spec.id]) {
           pendingRelistingByStock[spec.id] = {
             startedAt: Date.now(),
@@ -2398,17 +2439,18 @@ function isValidCandleRow(r) {
 }
 
 function aggFactorForDetailRange(range) {
-  return DETAIL_CHART_AGG_FACTOR_BY_RANGE[range] || 1;
+  return DETAIL_CHART_BUCKET_MINUTES_BY_RANGE[range] || 10;
 }
 
-function aggregateCandleRows(rows, factor) {
+function aggregateCandleRows(rows, bucketMinutes) {
   if (!Array.isArray(rows) || rows.length === 0) return [];
-  const f = Math.max(1, Math.floor(Number(factor) || 1));
-  if (f <= 1) return rows.slice();
+  const bucket = Math.max(10, Math.floor(Number(bucketMinutes) || 10));
+  if (bucket <= 10) return rows.slice();
   const out = [];
-  for (let i = 0; i < rows.length; i += f) {
-    const grp = rows.slice(i, i + f);
-    if (grp.length === 0) continue;
+  let grp = [];
+  let grpKey = null;
+  const flush = () => {
+    if (grp.length === 0) return;
     const first = grp[0];
     const last = grp[grp.length - 1];
     const o = Number(first.o);
@@ -2434,7 +2476,26 @@ function aggregateCandleRows(rows, factor) {
         v: Math.max(1, Math.floor(v)),
       })
     );
+  };
+  for (let i = 0; i < rows.length; i += 1) {
+    const r = rows[i];
+    const ord = Number(r.gameTimeOrdinal);
+    if (!Number.isFinite(ord)) continue;
+    const key = Math.floor(ord / bucket);
+    if (grpKey == null) {
+      grpKey = key;
+      grp.push(r);
+      continue;
+    }
+    if (key !== grpKey) {
+      flush();
+      grp = [r];
+      grpKey = key;
+    } else {
+      grp.push(r);
+    }
   }
+  flush();
   return out;
 }
 
@@ -2445,6 +2506,7 @@ function buildPreparedDetailRows(stockId) {
     .sort((a, b) => Number(a.gameTimeOrdinal) - Number(b.gameTimeOrdinal));
   const rows = hist.map((r) => normalizeCandleRow({ ...r }));
   if (
+    !delistedStocks[stockId] &&
     tickInCandle > 0 &&
     isTradingWindowActive() &&
     gameMinutes < MARKET_CLOSE_MIN &&
@@ -2472,7 +2534,25 @@ function buildPreparedDetailRows(stockId) {
     }
   }
   const aggregated = aggregateCandleRows(rows, aggFactorForDetailRange(range));
-  return sampleRowsForDetailChart(aggregated);
+  const sampled = sampleRowsForDetailChart(aggregated);
+  if (sampled.length > 0) return sampled;
+  if (delistedStocks[stockId]) {
+    const x = candleDateMs(gameDayIndex, gameMinutes);
+    return [
+      normalizeCandleRow({
+        dayIndex: gameDayIndex,
+        periodStartMin: gameMinutes,
+        gameTimeOrdinal: gameTimeOrdinalFromParts(gameDayIndex, gameMinutes),
+        x,
+        o: 0,
+        h: 0,
+        l: 0,
+        c: 0,
+        v: 1,
+      }),
+    ];
+  }
+  return sampled;
 }
 
 function getAvgCostForStock(stockId) {
@@ -2485,30 +2565,49 @@ function getAvgCostForStock(stockId) {
 
 function buildDetailChartAnnotations(stockId) {
   const avg = getAvgCostForStock(stockId);
+  const delisted = !!delistedStocks[stockId];
+  const yaxis = [];
   if (avg == null) {
-    return { yaxis: [], xaxis: [] };
-  }
-  return {
-    yaxis: [
-      {
-        y: avg,
-        borderColor: "rgba(250, 204, 21, 0.9)",
-        strokeDashArray: 6,
-        label: {
-          text: "평단",
-          position: "left",
-          textAnchor: "start",
-          borderColor: "transparent",
-          style: {
-            color: "#facc15",
-            fontSize: "10px",
-            fontWeight: 600,
-            background: "rgba(30, 30, 30, 0.7)",
-          },
+    if (!delisted) return { yaxis: [], xaxis: [] };
+  } else {
+    yaxis.push({
+      y: avg,
+      borderColor: "rgba(250, 204, 21, 0.9)",
+      strokeDashArray: 6,
+      label: {
+        text: "평단",
+        position: "left",
+        textAnchor: "start",
+        borderColor: "transparent",
+        style: {
+          color: "#facc15",
+          fontSize: "10px",
+          fontWeight: 600,
+          background: "rgba(30, 30, 30, 0.7)",
         },
       },
-    ],
-  };
+    });
+  }
+  if (delisted) {
+    yaxis.push({
+      y: 0,
+      borderColor: "rgba(99, 102, 241, 0.75)",
+      strokeDashArray: 0,
+      label: {
+        text: "상장폐지 상태",
+        position: "left",
+        textAnchor: "start",
+        borderColor: "transparent",
+        style: {
+          color: "#dbeafe",
+          fontSize: "10px",
+          fontWeight: 600,
+          background: "rgba(31, 41, 55, 0.8)",
+        },
+      },
+    });
+  }
+  return { yaxis, xaxis: [] };
 }
 
 function syncDetailChartRangeButtons() {
@@ -2619,6 +2718,54 @@ function resetDailyNewsState() {
   newsCountByStock = emptyChainState();
   chainStepByStock = emptyChainState();
   specialEventsGenerator.resetDay();
+}
+
+function syncMarketListFilterButtons() {
+  document.querySelectorAll("[data-market-filter]").forEach((b) => {
+    const m = b.getAttribute("data-market-filter");
+    b.classList.toggle("is-active", m === marketListFilterMode);
+  });
+}
+
+function bindMarketListFilterUiOnce() {
+  const bar = document.getElementById("marketListFilterBar");
+  if (!bar || bar.dataset.bound === "1") return;
+  bar.dataset.bound = "1";
+  bar.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-market-filter]");
+    if (!btn) return;
+    const mode = btn.getAttribute("data-market-filter");
+    if (mode !== "all" && mode !== "mine") return;
+    if (marketListFilterMode === mode) return;
+    marketListFilterMode = mode;
+    syncMarketListFilterButtons();
+    renderStockListMain();
+  });
+  syncMarketListFilterButtons();
+}
+
+function buildMiniSparklineSvg(stockId) {
+  const st = getStockById(stockId);
+  const rows = (candleHistory[stockId] || [])
+    .slice(-24)
+    .map((r) => normalizeCandleRow(r))
+    .filter((r) => Number.isFinite(Number(r.c)));
+  const vals = rows.map((r) => Number(r.c));
+  if (vals.length === 0 && st) vals.push(Number(st.price) || 0);
+  const width = 280;
+  const height = 56;
+  const min = Math.min(...vals);
+  const max = Math.max(...vals);
+  const span = Math.max(1, max - min);
+  const pts = vals
+    .map((v, i) => {
+      const x = vals.length <= 1 ? width / 2 : (i / (vals.length - 1)) * width;
+      const y = height - ((v - min) / span) * (height - 8) - 4;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  const stroke = delistedStocks[stockId] ? "#94a3b8" : vals[vals.length - 1] >= vals[0] ? CANDLE_UP : CANDLE_DOWN;
+  return `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true"><polyline fill="none" stroke="${stroke}" stroke-width="2" points="${pts}" /></svg>`;
 }
 
 /** 상승/하락 편에 맞는 밈 헤드라인( impacts 부호 기준 ) */
@@ -3935,7 +4082,6 @@ function estimatePartialBarVolume(stockId) {
 }
 
 function buildCandleSeriesData(stockId) {
-  if (delistedStocks[stockId]) return [];
   const rows = buildPreparedDetailRows(stockId).map((r) => ({
     x: r.x,
     y: [
@@ -3955,7 +4101,6 @@ function buildCandleSeriesData(stockId) {
 }
 
 function buildVolumeSeriesData(stockId) {
-  if (delistedStocks[stockId]) return [];
   const rows = buildPreparedDetailRows(stockId).map((r) => {
     const up = r.c >= r.o;
     return {
@@ -3981,7 +4126,6 @@ function getDetailChartCategoriesAndCandleSeries(stockId) {
 
 /** 종가 기준 선차트 — X 라벨은 캔들과 동일한 시계열 */
 function buildLineSeriesData(stockId) {
-  if (delistedStocks[stockId]) return [];
   const rows = buildPreparedDetailRows(stockId).map((r) => ({
     x: detailChartDatetimeFormatter(r.x),
     y: Math.floor(r.c),
@@ -4251,10 +4395,6 @@ function buildDetailChartMainAndVolOpts(stockId, xa) {
 
 function initDetailCharts(stockId) {
   if (typeof ApexCharts === "undefined") return;
-  if (delistedStocks[stockId]) {
-    destroyDetailCharts();
-    return;
-  }
   const s = getStockById(stockId);
   if (!s) return;
 
@@ -4301,7 +4441,6 @@ function initDetailCharts(stockId) {
 function refreshDetailChart() {
   if (!selectedStockId || !apexDetail.candle || !apexDetail.vol) return;
   const id = selectedStockId;
-  if (delistedStocks[id]) return;
   const { categories, candleSeriesData } = getDetailChartCategoriesAndCandleSeries(id);
   const volPts = buildVolumeSeriesData(id);
   const volData = volPts.map((p) => ({
@@ -4857,7 +4996,17 @@ function renderStockListMain() {
   if (!ul) return;
   ul.innerHTML = "";
 
-  stocks.forEach((s) => {
+  const visible = stocks.filter((s) => {
+    if (marketListFilterMode !== "mine") return true;
+    const held = Math.max(0, Math.floor(Number(game.holdings[s.id] ?? 0)));
+    return held > 0;
+  });
+  if (visible.length === 0) {
+    ul.innerHTML = `<li class="stock-list-row"><p class="stock-list-desc">보유 중인 주식이 없습니다. 먼저 종목을 매수해 주세요.</p></li>`;
+    return;
+  }
+
+  visible.forEach((s) => {
     const open = sessionOpenPrice[s.id] ?? s.price;
     const chg = s.price - open;
     const chgPct = open !== 0 ? (chg / open) * 100 : 0;
@@ -4889,6 +5038,7 @@ function renderStockListMain() {
         </div>
       </div>
       <p class="stock-list-desc">${escapeHtml(s.desc)}</p>
+      <div class="stock-mini-chart">${buildMiniSparklineSvg(s.id)}</div>
     `;
 
     const wbtn = li.querySelector(".list-watch-btn");
@@ -5721,6 +5871,7 @@ function initNewGame() {
     s.price = randomInitialPrice();
     delistedStocks[s.id] = false;
     delete pendingRelistingByStock[s.id];
+    virtualTraderHoldingsByStock[s.id] = 0;
     executionFlowByStock[s.id] = { buyVol: 1, sellVol: 1 };
   });
   resetNewsSpikeState();
@@ -5768,6 +5919,7 @@ async function runGameBootstrap() {
 
   bindDetailChartRangeUiOnce();
   bindDetailChartTypeToggleOnce();
+  bindMarketListFilterUiOnce();
 
   bindLifeUi();
   bindCharacterSetup();
