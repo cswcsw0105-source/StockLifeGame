@@ -4,6 +4,10 @@
  * 온라인: Supabase `market_state`(클라이언트 주도 10초 틱 + Realtime) + RPC 매매
  */
 import { createClient } from "@supabase/supabase-js";
+import {
+  createSpecialEventsGenerator,
+  DEFAULT_SPECIAL_EVENT_CONFIG,
+} from "./special_events_generator.js";
 
 /**
  * Supabase `public` 스키마 테이블명 — `supabase/stock_life_full_setup.sql` 과 동일해야 함.
@@ -38,6 +42,9 @@ const NEWS_DISPLAY_PREFIX_TAGS = [
   "[특종]",
   "[긴급]",
 ];
+const specialEventsGenerator = createSpecialEventsGenerator(
+  DEFAULT_SPECIAL_EVENT_CONFIG
+);
 
 function stableHashForNewsDisplay(it) {
   const key = `${it.ts || ""}|${it.gameDayIndex ?? ""}|${it.gameMinutes ?? ""}|${it.text || ""}|${it.stockId || ""}|${it.type || ""}`;
@@ -86,8 +93,9 @@ const EMERGENCY_JOB_CASH_THRESHOLD = 1_000_000;
 const EMERGENCY_LOCK_MS = 15 * 60 * 1000;
 /** 매매 수량은 DB(bigint 등)와 맞추기 위해 항상 정수(주)만 사용 */
 
-/** 동전주 메타 — 상장 폐지 방지 최저가(원) */
-const MIN_STOCK_PRICE = 30;
+/** 가격 하한(원): 0원 허용, 0원 이하는 상장폐지 처리 */
+const MIN_STOCK_PRICE = 0;
+const MAX_SAFE_WON = Number.MAX_SAFE_INTEGER;
 /** 거래 수수료 0.25% — 매수 시 총액×1.0025, 매도 시 총액×0.9975 (RPC·클라이언트 동일) */
 const TRADE_FEE_RATE = 0.0025;
 const TRADE_FEE_MULT_BUY = 1 + TRADE_FEE_RATE;
@@ -183,19 +191,123 @@ function clampStockPrice(p) {
   return Math.max(MIN_STOCK_PRICE, Math.floor(n));
 }
 
+/** 상장폐지(0원 이하) 상태 종목 추적 */
+const delistedStocks = {};
+/** 상장폐지 후 재상장 대기 상태 */
+const pendingRelistingByStock = {};
+const RELIST_WAIT_MS = 5 * 60 * 1000;
+const RELIST_ALERT_BEFORE_MS = 60 * 1000;
+const RELIST_BASE_PRICE = 100;
+
+function clampSafeInteger(n, fallback = 0) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return fallback;
+  if (v > MAX_SAFE_WON) return MAX_SAFE_WON;
+  if (v < -MAX_SAFE_WON) return -MAX_SAFE_WON;
+  return Math.trunc(v);
+}
+
+function safeMulInteger(a, b) {
+  const av = clampSafeInteger(a, 0);
+  const bv = clampSafeInteger(b, 0);
+  return clampSafeInteger(av * bv, 0);
+}
+
 /** 구버전 market_state·손상 데이터로 NaN/누락 가격 복구 */
 function repairInvalidStockPrices() {
   try {
     stocks.forEach((s) => {
       const v = Number(s?.price);
-      if (!Number.isFinite(v) || v < MIN_STOCK_PRICE) {
+      if (!Number.isFinite(v) || v < 0) {
         s.price = randomInitialPrice();
+        delistedStocks[s.id] = false;
       }
     });
     syncEtfPriceFromMarket();
   } catch (e) {
     console.warn("repairInvalidStockPrices", e);
   }
+}
+
+function markStockDelisted(stockId) {
+  if (!stockId || delistedStocks[stockId]) return;
+  delistedStocks[stockId] = true;
+  pendingRelistingByStock[stockId] = {
+    startedAt: Date.now(),
+    warnAt: Date.now() + RELIST_WAIT_MS - RELIST_ALERT_BEFORE_MS,
+    relistAt: Date.now() + RELIST_WAIT_MS,
+    warned: false,
+  };
+  const st = getStockById(stockId);
+  if (st) st.price = 0;
+  game.holdings[stockId] = 0;
+  game.costBasis[stockId] = 0;
+  if (Array.isArray(pendingOrders) && pendingOrders.length > 0) {
+    pendingOrders = pendingOrders.filter((o) => o.symbol !== stockId);
+    renderPendingOrdersUi();
+  }
+  addNewsItem(`[상장폐지] ${stockId} 주가가 0원 이하로 하락했습니다.`, "calendar", "", {
+    stockId,
+    global: true,
+  });
+}
+
+function executeRelisting(stockId) {
+  const st = getStockById(stockId);
+  if (!st) return;
+  delistedStocks[stockId] = false;
+  delete pendingRelistingByStock[stockId];
+
+  st.price = RELIST_BASE_PRICE;
+  sessionOpenPrice[stockId] = RELIST_BASE_PRICE;
+  prevTickPrice[stockId] = RELIST_BASE_PRICE;
+  candleHistory[stockId] = [];
+  delete openingGapBlendByStock[stockId];
+  newsSpikeTicksLeft[stockId] = 0;
+  newsSpikeDirection[stockId] = 1;
+  newsSpikeMode[stockId] = "normal";
+  delete newsSpikeExtremeTarget[stockId];
+  if (candleOhlcBuffer[stockId]) {
+    candleOhlcBuffer[stockId] = {
+      o: RELIST_BASE_PRICE,
+      h: RELIST_BASE_PRICE,
+      l: RELIST_BASE_PRICE,
+    };
+  }
+  if (Array.isArray(pendingOrders) && pendingOrders.length > 0) {
+    pendingOrders = pendingOrders.filter((o) => o.symbol !== stockId);
+  }
+  renderPendingOrdersUi();
+  addNewsItem(`[재상장] ${stockId} 종목이 100원 기준가로 재상장되었습니다.`, "news", "", {
+    stockId,
+    global: true,
+  });
+  setMessage(`🚀 ${stockId} 재상장 완료 · 기준가 ${formatWon(RELIST_BASE_PRICE)}`, "ok");
+  if (selectedStockId === stockId) {
+    initDetailCharts(stockId);
+  } else {
+    refreshDetailChart();
+  }
+}
+
+function processRelistingQueue() {
+  const now = Date.now();
+  STOCK_SPECS.forEach((spec) => {
+    const id = spec.id;
+    const state = pendingRelistingByStock[id];
+    if (!state || !delistedStocks[id]) return;
+    if (!state.warned && now >= state.warnAt) {
+      state.warned = true;
+      addNewsItem(`🚨 [공지] ${id} 종목의 재상장이 60초 후 시작됩니다!`, "calendar", "", {
+        stockId: id,
+        global: true,
+      });
+      setMessage(`🚨 [공지] ${id} 종목의 재상장이 60초 후 시작됩니다!`, "ok");
+    }
+    if (now >= state.relistAt) {
+      executeRelisting(id);
+    }
+  });
 }
 
 const STOCK_SPECS = [
@@ -447,6 +559,9 @@ let chainStepByStock = emptyChainState();
 const stocks = STOCK_SPECS.map((spec) => ({
   ...spec,
 }));
+STOCK_SPECS.forEach((spec) => {
+  if (delistedStocks[spec.id] === undefined) delistedStocks[spec.id] = false;
+});
 
 function stockSpecById(id) {
   return STOCK_SPECS.find((s) => s.id === id);
@@ -498,9 +613,10 @@ function scheduleNewsSpikeForStock(stockId, directionSign) {
 /** 극호재(5~10배)·극악재(~1/10) — ETF 제외, 희귀 이벤트 */
 function rollExtremeNewsKnock(stockId, positive) {
   if (!getStockById(stockId) || isEtfId(stockId)) return;
+  if (delistedStocks[stockId]) return;
   const s = getStockById(stockId);
   const p = Number(s.price);
-  if (!Number.isFinite(p) || p < MIN_STOCK_PRICE) return;
+  if (!Number.isFinite(p) || p <= 0) return;
   const spreadTicks = 3 + Math.floor(Math.random() * 3);
   newsSpikeTicksLeft[stockId] = Math.max(
     newsSpikeTicksLeft[stockId] || 0,
@@ -514,7 +630,7 @@ function rollExtremeNewsKnock(stockId, positive) {
     );
   } else {
     newsSpikeExtremeTarget[stockId] = clampStockPrice(
-      Math.max(MIN_STOCK_PRICE, Math.floor(p * (0.05 + Math.random() * 0.05)))
+      Math.max(0, Math.floor(p * (0.02 + Math.random() * 0.08)))
     );
   }
 }
@@ -555,6 +671,7 @@ const DETAIL_CHART_MAX_POINTS = {
   m1: 1600,
   all: 1800,
 };
+const DETAIL_CHART_SAMPLE_MAX_POINTS = 120;
 /** 상세 차트: candle | line */
 let detailChartType = "candle";
 /** 종목 상세 현재가 표시 직전 가격(틱 애니메이션) */
@@ -1041,10 +1158,12 @@ async function loadUserFromServer() {
   STOCK_SPECS.forEach((spec) => {
     game.holdings[spec.id] = 0;
     game.costBasis[spec.id] = 0;
+    delistedStocks[spec.id] = false;
+    delete pendingRelistingByStock[spec.id];
   });
   (ports || []).forEach((p) => {
     game.holdings[p.symbol] = Math.max(0, Math.floor(Number(p.shares)));
-    game.costBasis[p.symbol] = Number(p.avg_cost);
+    game.costBasis[p.symbol] = Math.max(0, clampSafeInteger(p.avg_cost, 0));
   });
   renderPlayerLoginBadge();
   renderJobScheduleUi();
@@ -1216,7 +1335,7 @@ function applyServerMarketState(m) {
   if (m.newsSpikeExtremeTarget && typeof m.newsSpikeExtremeTarget === "object") {
     STOCK_SPECS.forEach((spec) => {
       const v = Number(m.newsSpikeExtremeTarget[spec.id]);
-      if (Number.isFinite(v) && v >= MIN_STOCK_PRICE) {
+      if (Number.isFinite(v) && v > 0) {
         newsSpikeExtremeTarget[spec.id] = clampStockPrice(Math.round(v));
       }
     });
@@ -1258,10 +1377,27 @@ function applyServerMarketState(m) {
       return;
     }
     const px = Number(row.price);
-    if (!Number.isFinite(px) || px < MIN_STOCK_PRICE) {
+    if (!Number.isFinite(px) || px < 0) {
       s.price = randomInitialPrice();
+      delistedStocks[spec.id] = false;
+      delete pendingRelistingByStock[spec.id];
     } else {
       s.price = clampStockPrice(px);
+      delistedStocks[spec.id] = s.price <= 0;
+      if (delistedStocks[spec.id]) {
+        game.holdings[spec.id] = 0;
+        game.costBasis[spec.id] = 0;
+        if (!pendingRelistingByStock[spec.id]) {
+          pendingRelistingByStock[spec.id] = {
+            startedAt: Date.now(),
+            warnAt: Date.now() + RELIST_WAIT_MS - RELIST_ALERT_BEFORE_MS,
+            relistAt: Date.now() + RELIST_WAIT_MS,
+            warned: false,
+          };
+        }
+      } else {
+        delete pendingRelistingByStock[spec.id];
+      }
     }
   });
   repairInvalidStockPrices();
@@ -1495,6 +1631,7 @@ function serializeMarketState() {
 }
 
 function advanceOneGameMinuteOnline() {
+  processRelistingQueue();
   if (awaitingDayRoll) return;
 
   if (gameMinutes < MARKET_OPEN_MIN) {
@@ -2199,6 +2336,18 @@ function capDetailChartRows(rows, range) {
   return rows.slice(-cap);
 }
 
+function sampleRowsForDetailChart(rows, maxPoints = DETAIL_CHART_SAMPLE_MAX_POINTS) {
+  if (!Array.isArray(rows) || rows.length <= maxPoints) return rows;
+  const cap = Math.max(10, Math.floor(Number(maxPoints) || DETAIL_CHART_SAMPLE_MAX_POINTS));
+  const out = [];
+  const step = (rows.length - 1) / (cap - 1);
+  for (let i = 0; i < cap; i += 1) {
+    const idx = Math.min(rows.length - 1, Math.round(i * step));
+    out.push(rows[idx]);
+  }
+  return out;
+}
+
 function getFilteredCandleHistory(stockId) {
   const raw = candleHistory[stockId] || [];
   const range = detailChartRange || "all";
@@ -2209,7 +2358,7 @@ function getFilteredCandleHistory(stockId) {
 function getAvgCostForStock(stockId) {
   const sh = Math.max(0, Math.floor(Number(game.holdings[stockId] ?? 0)));
   if (sh <= 0) return null;
-  const cb = game.costBasis[stockId] ?? 0;
+  const cb = Math.max(0, clampSafeInteger(game.costBasis[stockId] ?? 0, 0));
   const a = Math.floor(cb / sh);
   return Number.isFinite(a) && a > 0 ? a : null;
 }
@@ -2349,6 +2498,7 @@ function isTradingSession() {
 function resetDailyNewsState() {
   newsCountByStock = emptyChainState();
   chainStepByStock = emptyChainState();
+  specialEventsGenerator.resetDay();
 }
 
 /** 상승/하락 편에 맞는 밈 헤드라인( impacts 부호 기준 ) */
@@ -2787,22 +2937,23 @@ function subscribeSocialTradeRealtime() {
 function portfolioValue() {
   let v = 0;
   stocks.forEach((s) => {
-    const qty = game.holdings[s.id] ?? 0;
-    v += qty * s.price;
+    const qty = Math.max(0, clampSafeInteger(game.holdings[s.id] ?? 0, 0));
+    const px = Math.max(MIN_STOCK_PRICE, clampSafeInteger(s.price, MIN_STOCK_PRICE));
+    v = clampSafeInteger(v + safeMulInteger(qty, px), 0);
   });
   return v;
 }
 
 function netWorth() {
-  return game.cash + portfolioValue();
+  return clampSafeInteger(clampSafeInteger(game.cash, 0) + portfolioValue(), 0);
 }
 
 function totalStockCost() {
   let t = 0;
   stocks.forEach((s) => {
-    const q = game.holdings[s.id] ?? 0;
+    const q = Math.max(0, clampSafeInteger(game.holdings[s.id] ?? 0, 0));
     if (q <= 0) return;
-    t += game.costBasis[s.id] ?? 0;
+    t = clampSafeInteger(t + Math.max(0, clampSafeInteger(game.costBasis[s.id] ?? 0, 0)), 0);
   });
   return t;
 }
@@ -2811,13 +2962,14 @@ function stockEvalProfit() {
   let ev = 0;
   let cost = 0;
   stocks.forEach((s) => {
-    const q = game.holdings[s.id] ?? 0;
+    const q = Math.max(0, clampSafeInteger(game.holdings[s.id] ?? 0, 0));
     if (q <= 0) return;
-    const cb = game.costBasis[s.id] ?? 0;
-    cost += cb;
-    ev += q * s.price;
+    const cb = Math.max(0, clampSafeInteger(game.costBasis[s.id] ?? 0, 0));
+    const px = Math.max(MIN_STOCK_PRICE, clampSafeInteger(s.price, MIN_STOCK_PRICE));
+    cost = clampSafeInteger(cost + cb, 0);
+    ev = clampSafeInteger(ev + safeMulInteger(q, px), 0);
   });
-  return { eval: ev, cost, pl: ev - cost };
+  return { eval: ev, cost, pl: clampSafeInteger(ev - cost, 0) };
 }
 
 /** RPC `execute_sell_by_name` 와 동일한 실현손익(매도 직전 상태 기준) */
@@ -3144,6 +3296,9 @@ async function buyStock(stockId, quantityRaw, mode = "shares") {
   }
   const stock = getStockById(stockId);
   if (!stock) return { ok: false, reason: "존재하지 않는 종목입니다." };
+  if (delistedStocks[stockId] || Number(stock.price) <= 0) {
+    return { ok: false, reason: "상장폐지된 종목은 매수할 수 없습니다." };
+  }
   const execPx = Math.floor(Number(stock.price));
 
   const { data, error } = await sb.rpc("execute_buy_by_name", {
@@ -3186,6 +3341,9 @@ async function sellStock(stockId, quantityRaw, mode = "shares") {
   }
   const stock = getStockById(stockId);
   if (!stock) return { ok: false, reason: "존재하지 않는 종목입니다." };
+  if (delistedStocks[stockId] || Number(stock.price) <= 0) {
+    return { ok: false, reason: "상장폐지된 종목은 매도할 수 없습니다." };
+  }
   const execPx = Math.floor(Number(stock.price));
   const realizedPl = computeRealizedProfitBeforeSell(stockId, q);
 
@@ -3270,7 +3428,7 @@ async function processPendingOrdersMatchAsync() {
         continue;
       }
       const px = Number(s.price);
-      if (!Number.isFinite(px) || px < MIN_STOCK_PRICE) {
+      if (!Number.isFinite(px) || px <= 0 || delistedStocks[o.symbol]) {
         keep.push(o);
         continue;
       }
@@ -3319,19 +3477,30 @@ function syncEtfPriceFromMarket() {
       if (spec.kind === "etf") return;
       const st = getStockById(spec.id);
       if (!st) return;
+      if (delistedStocks[spec.id]) return;
       const p = Number(st.price);
-      if (!Number.isFinite(p) || p < MIN_STOCK_PRICE) return;
+      if (!Number.isFinite(p) || p <= 0) return;
       sum += p;
       n += 1;
     });
     if (n > 0) {
       etf.price = clampStockPrice(Math.floor(sum / n));
     } else {
-      etf.price = clampStockPrice(etf.price);
+      etf.price = 0;
     }
   } catch (e) {
     console.warn("syncEtfPriceFromMarket", e);
   }
+}
+
+function randomSignedDeltaByPct(price, minPct, maxPct) {
+  const p = Math.max(0, Math.floor(Number(price) || 0));
+  if (p <= 0) return 0;
+  const lo = Math.max(0.0001, Number(minPct) || 0.01);
+  const hi = Math.max(lo, Number(maxPct) || lo);
+  const pct = lo + Math.random() * (hi - lo);
+  const mag = Math.max(1, Math.floor(p * pct));
+  return (Math.random() < 0.5 ? -1 : 1) * mag;
 }
 
 /**
@@ -3342,6 +3511,10 @@ function oneMicroPriceStep() {
   stocks.forEach((s) => {
     const id = s.id;
     if (isEtfId(id)) return;
+    if (delistedStocks[id]) {
+      s.price = 0;
+      return;
+    }
 
     const gapBlend = openingGapBlendByStock[id];
     if (gapBlend && typeof gapBlend === "object") {
@@ -3363,6 +3536,11 @@ function oneMicroPriceStep() {
       ) {
         const frac = easedOpenGapFrac(imm, ni, ts);
         s.price = clampStockPrice(Math.round(anchor + (target - anchor) * frac));
+        if (s.price <= 0) {
+          markStockDelisted(id);
+          delete openingGapBlendByStock[id];
+          return;
+        }
         if (ni >= ts) {
           delete openingGapBlendByStock[id];
         } else {
@@ -3389,6 +3567,12 @@ function oneMicroPriceStep() {
               Math.round(s.price + (tgt - s.price) * alpha)
             );
           }
+          if (s.price <= 0) {
+            markStockDelisted(id);
+            newsSpikeMode[id] = "normal";
+            delete newsSpikeExtremeTarget[id];
+            return;
+          }
           if (leftAfter <= 0) {
             newsSpikeMode[id] = "normal";
             delete newsSpikeExtremeTarget[id];
@@ -3399,31 +3583,31 @@ function oneMicroPriceStep() {
         delete newsSpikeExtremeTarget[id];
       }
       const up = (newsSpikeDirection[id] ?? 1) >= 0;
-      let delta;
-      if (up) {
-        delta = 20 + Math.floor(Math.random() * 31);
-      } else {
-        delta = -(20 + Math.floor(Math.random() * 21));
-      }
+      const absDelta = Math.max(1, Math.floor((s.price || 0) * (0.015 + Math.random() * 0.05)));
+      const delta = up ? absDelta : -absDelta;
       s.price = clampStockPrice(s.price + delta);
+      if (s.price <= 0) {
+        markStockDelisted(id);
+      }
       return;
     }
-    let delta;
+    let delta = 0;
     if (isReitId(id)) {
-      const w = Math.max(2, Math.min(18, Math.floor(3 + s.price * 0.0009)));
-      delta = Math.floor((Math.random() + Math.random() - 1) * w);
+      delta = randomSignedDeltaByPct(s.price, 0.01, 0.03);
     } else {
-      const base = Math.max(
-        8,
-        Math.min(150, Math.floor(7 + s.price * 0.0052))
-      );
-      delta = Math.floor((Math.random() + Math.random() - 1) * base);
+      delta = randomSignedDeltaByPct(s.price, 0.01, 0.05);
       if (Math.random() < 0.08) {
-        const kick = Math.floor(Math.random() * Math.min(45, base + 12));
+        const kick = Math.max(1, Math.floor((s.price || 0) * (0.02 + Math.random() * 0.06)));
         delta += (Math.random() < 0.5 ? -1 : 1) * kick;
       }
     }
+    if (s.price <= 3 && Math.random() < 0.45) {
+      delta -= 1;
+    }
     s.price = clampStockPrice(s.price + delta);
+    if (s.price <= 0) {
+      markStockDelisted(id);
+    }
   });
   syncEtfPriceFromMarket();
 }
@@ -3525,6 +3709,7 @@ function sealCurrentCandleAndReset() {
     (gameMinutes - MARKET_OPEN_MIN) / CANDLE_GAME_MINUTES
   );
   tryFireChainNews(completed);
+  tryFireMutantNewsEvent(completed);
   tryEmitExtraRumorChatter();
   tickInCandle = 0;
 }
@@ -3605,6 +3790,7 @@ function estimatePartialBarVolume(stockId) {
 }
 
 function buildCandleSeriesData(stockId) {
+  if (delistedStocks[stockId]) return [];
   const hist = getFilteredCandleHistory(stockId);
   const rows = hist.map((r) => ({
     x: r.x,
@@ -3639,10 +3825,11 @@ function buildCandleSeriesData(stockId) {
       });
     }
   }
-  return rows;
+  return sampleRowsForDetailChart(rows);
 }
 
 function buildVolumeSeriesData(stockId) {
+  if (delistedStocks[stockId]) return [];
   const hist = getFilteredCandleHistory(stockId);
   const rows = hist.map((r) => {
     const up = r.c >= r.o;
@@ -3670,7 +3857,7 @@ function buildVolumeSeriesData(stockId) {
       });
     }
   }
-  return rows;
+  return sampleRowsForDetailChart(rows);
 }
 
 /**
@@ -3691,6 +3878,7 @@ function getDetailChartCategoriesAndCandleSeries(stockId) {
 
 /** 종가 기준 선차트 — X 라벨은 캔들과 동일한 시계열 */
 function buildLineSeriesData(stockId) {
+  if (delistedStocks[stockId]) return [];
   const hist = getFilteredCandleHistory(stockId);
   const rows = hist.map((r) => ({
     x: r.x,
@@ -3711,7 +3899,7 @@ function buildLineSeriesData(stockId) {
       });
     }
   }
-  return rows;
+  return sampleRowsForDetailChart(rows);
 }
 
 function detailLineStrokeColor(stockId) {
@@ -3757,34 +3945,12 @@ function computeDetailChartYBounds(stockId) {
   };
 }
 
-const DETAIL_CHART_CROSSHAIR_STROKE = {
-  color: "rgba(139, 149, 168, 0.5)",
-  width: 1,
-  dashArray: 0,
-};
-
-/** 상세 차트 메인 — 호버 툴팁·십자선 */
-function detailChartMainTooltipOpts() {
-  return {
-    enabled: true,
-    theme: "dark",
-    shared: true,
-    intersect: false,
-    x: { show: true },
-  };
-}
-
 /** 상세 차트 X축 — 고정 옵션(Apex category + tickAmount 조합 오류 방지) */
 function detailChartXaxisConfig(categories) {
   return {
     type: "category",
     categories: Array.isArray(categories) ? categories : [],
     tickAmount: 6,
-    crosshairs: {
-      show: true,
-      position: "front",
-      stroke: DETAIL_CHART_CROSSHAIR_STROKE,
-    },
     labels: {
       rotate: -45,
       hideOverlappingLabels: true,
@@ -3801,11 +3967,6 @@ function detailChartXaxisConfigFallback(categories) {
   return {
     type: "category",
     categories: Array.isArray(categories) ? categories : [],
-    crosshairs: {
-      show: true,
-      position: "front",
-      stroke: DETAIL_CHART_CROSSHAIR_STROKE,
-    },
     labels: {
       rotate: -45,
       hideOverlappingLabels: true,
@@ -3819,11 +3980,6 @@ function detailChartXaxisConfigFallback(categories) {
 
 function detailChartYaxisConfig(yb) {
   const base = {
-    crosshairs: {
-      show: true,
-      position: "front",
-      stroke: DETAIL_CHART_CROSSHAIR_STROKE,
-    },
     labels: {
       style: { colors: "#8b95a8", fontSize: "10px" },
       formatter: (v) => Math.floor(v).toLocaleString("ko-KR"),
@@ -3924,7 +4080,7 @@ function buildDetailChartMainAndVolOpts(stockId, xa) {
         size: 0,
         hover: { size: 4 },
       },
-      tooltip: detailChartMainTooltipOpts(),
+      tooltip: { enabled: false },
       annotations: ann,
       xaxis: xa,
       yaxis: detailChartYaxisConfig(yb),
@@ -3942,7 +4098,7 @@ function buildDetailChartMainAndVolOpts(stockId, xa) {
           dynamicAnimation: { enabled: true, speed: 260 },
         },
       },
-      tooltip: detailChartMainTooltipOpts(),
+      tooltip: { enabled: false },
       series: [{ name: stockId, data: candleSeriesData }],
       stroke: {
         width: [1.15],
@@ -3995,6 +4151,10 @@ function buildDetailChartMainAndVolOpts(stockId, xa) {
 
 function initDetailCharts(stockId) {
   if (typeof ApexCharts === "undefined") return;
+  if (delistedStocks[stockId]) {
+    destroyDetailCharts();
+    return;
+  }
   const s = getStockById(stockId);
   if (!s) return;
 
@@ -4041,6 +4201,7 @@ function initDetailCharts(stockId) {
 function refreshDetailChart() {
   if (!selectedStockId || !apexDetail.candle || !apexDetail.vol) return;
   const id = selectedStockId;
+  if (delistedStocks[id]) return;
   const { categories, candleSeriesData } = getDetailChartCategoriesAndCandleSeries(id);
   const volPts = buildVolumeSeriesData(id);
   const volData = volPts.map((p) => ({
@@ -4069,7 +4230,7 @@ function refreshDetailChart() {
             width: 2.5,
             colors: [lineColor],
           },
-          tooltip: detailChartMainTooltipOpts(),
+          tooltip: { enabled: false },
           xaxis: xaxisShared,
           yaxis: detailChartYaxisConfig(yb),
           annotations: ann,
@@ -4081,7 +4242,7 @@ function refreshDetailChart() {
       apexDetail.candle.updateSeries([{ name: id, data: candleSeriesData }], true);
       apexDetail.candle.updateOptions(
         {
-          tooltip: detailChartMainTooltipOpts(),
+          tooltip: { enabled: false },
           xaxis: xaxisShared,
           yaxis: detailChartYaxisConfig(yb),
           annotations: ann,
@@ -4230,8 +4391,8 @@ function updateDetailTradeLivePreview() {
   }
   wrap.hidden = false;
   const sh = Math.max(0, Math.floor(Number(game.holdings[selectedStockId] ?? 0)));
-  const cb = game.costBasis[selectedStockId] ?? 0;
-  const P = s.price;
+  const cb = Math.max(0, clampSafeInteger(game.costBasis[selectedStockId] ?? 0, 0));
+  const P = Math.max(MIN_STOCK_PRICE, clampSafeInteger(s.price, MIN_STOCK_PRICE));
 
   if (lastDetailTradeAction === "buy") {
     const cost = Math.round(P * qty * TRADE_FEE_MULT_BUY);
@@ -4342,6 +4503,34 @@ function tryFireChainNews(completedCandleCount) {
     if (!asRumor) applyNewsPayload(story);
     chainStepByStock[stockId] += 1;
     newsCountByStock[stockId] += 1;
+  });
+}
+
+function tryFireMutantNewsEvent(completedCandleCount) {
+  if (!isTradingWindowActive()) return;
+  if (completedCandleCount < 2) return;
+  const candidates = stocks.filter(
+    (s) =>
+      !isEtfId(s.id) &&
+      !delistedStocks[s.id] &&
+      Number.isFinite(Number(s.price)) &&
+      Number(s.price) > 0
+  );
+  const ev = specialEventsGenerator.nextEvent({
+    stocks: candidates.map((s) => ({ id: s.id, name: s.name })),
+  });
+  if (!ev) return;
+  addNewsItem(ev.headline, ev.feedType || "chain", "", {
+    stockId: ev.primaryStockId,
+    global: true,
+    is_rumor: ev.isRumor === true,
+  });
+  setMessage(ev.headline, "ok");
+  applyNewsPayload({
+    headline: ev.headline,
+    impacts: ev.impacts || {},
+    bias: ev.bias || {},
+    volFactor: ev.volFactor || 1.5,
   });
 }
 function pickStockIdForAmbientNews() {
@@ -4583,6 +4772,7 @@ function renderStockListMain() {
     li.setAttribute("role", "button");
     li.tabIndex = 0;
     li.dataset.stockId = s.id;
+    const pendingRelisting = !!pendingRelistingByStock[s.id];
     li.innerHTML = `
       <div class="stock-list-row-main">
         <button type="button" class="btn-watchlist list-watch-btn" data-watch-stock="${escapeHtml(s.id)}" aria-label="관심 종목" aria-pressed="${watched}" title="관심 종목 (최대 ${MAX_WATCHLIST_IDS}개)">
@@ -4591,6 +4781,7 @@ function renderStockListMain() {
         <div class="stock-list-name-block">
           <span class="stock-list-name">${escapeHtml(s.name)}</span>
           <span class="stock-list-ticker">${escapeHtml(s.id)}</span>
+          ${pendingRelisting ? '<span class="stock-list-status-badge relisting">재상장 준비 중</span>' : ""}
         </div>
         <div class="stock-list-price-block">
           <span class="stock-list-price watch-price" data-watch-price="${escapeHtml(s.id)}">${formatStockWon(s.price)}</span>
@@ -4746,6 +4937,10 @@ function bindDetailTrade() {
   async function doTrade(action) {
     const id = selectedStockId;
     if (!id || !qtyInput) return;
+    if (delistedStocks[id]) {
+      setMessage("상장폐지된 종목은 거래할 수 없습니다.", "err");
+      return;
+    }
     if (tutorialGateActive) {
       setMessage("튜토리얼을 먼저 완료해 주세요.", "err");
       return;
@@ -4760,7 +4955,7 @@ function bindDetailTrade() {
       }
       const limitInp = document.getElementById("detailLimitPriceInput");
       const lp = Math.floor(Number(limitInp?.value ?? 0));
-      if (!Number.isFinite(lp) || lp < MIN_STOCK_PRICE) {
+      if (!Number.isFinite(lp) || lp <= 0) {
         setMessage("예약가를 올바르게 입력해 주세요.", "err");
         return;
       }
@@ -5026,6 +5221,7 @@ function fireDueCalendarEvents() {
 }
 
 function onSessionSecondTick() {
+  processRelistingQueue();
   if (tutorialGateActive) return;
   if (onlineMode) return;
   if (awaitingDayRoll) return;
@@ -5423,6 +5619,8 @@ function initNewGame() {
 
   stocks.forEach((s) => {
     s.price = randomInitialPrice();
+    delistedStocks[s.id] = false;
+    delete pendingRelistingByStock[s.id];
   });
   resetNewsSpikeState();
 
