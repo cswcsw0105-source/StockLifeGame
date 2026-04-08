@@ -5451,11 +5451,14 @@ function renderAssetSummary() {
   const prevBase = ensurePreviousDayAssetsBase();
   const dayPl = nw - prevBase;
   const dayPlPct = prevBase > 0 ? (dayPl / prevBase) * 100 : 0;
-  const cumBase = game.initialCapital ?? INITIAL_CAPITAL;
-  const cumPlPct = cumBase > 0 ? ((nw - cumBase) / cumBase) * 100 : 0;
+  const cumBase = INITIAL_CAPITAL;
+  const totalPl = nw - cumBase;
+  const totalPlPct = cumBase > 0 ? (totalPl / cumBase) * 100 : 0;
 
-  const profitEl = document.getElementById("summaryProfit");
-  const pctEl = document.getElementById("summaryProfitPct");
+  const totalEl = document.getElementById("summaryTotalProfit");
+  const totalPctEl = document.getElementById("summaryTotalProfitPct");
+  const dailyEl = document.getElementById("summaryDailyProfit");
+  const dailyPctEl = document.getElementById("summaryDailyProfitPct");
   const nwEl = document.getElementById("summaryNetWorth");
 
   if (nwEl) nwEl.textContent = formatWon(nw);
@@ -5469,17 +5472,20 @@ function renderAssetSummary() {
       totalStockCost()
     );
 
-  if (profitEl && pctEl) {
-    profitEl.textContent = `${dayPl >= 0 ? "+" : ""}${formatWon(dayPl)}`;
-    pctEl.textContent = `(${dayPlPct >= 0 ? "+" : ""}${dayPlPct.toFixed(
-      2
-    )}% · 누적 ${cumPlPct >= 0 ? "+" : ""}${cumPlPct.toFixed(2)}%)`;
-    profitEl.className = `asset-sub ${
-      dayPl > 0 ? "value-up" : dayPl < 0 ? "value-down" : "value-neutral"
-    }`;
-    pctEl.className = `asset-pct ${
-      dayPl > 0 ? "value-up" : dayPl < 0 ? "value-down" : "value-neutral"
-    }`;
+  if (totalEl && totalPctEl && dailyEl && dailyPctEl) {
+    totalEl.textContent = `총 평가손익: ${totalPl >= 0 ? "+" : ""}${formatWon(totalPl)}`;
+    totalPctEl.textContent = `(${totalPlPct >= 0 ? "+" : ""}${totalPlPct.toFixed(2)}%)`;
+    dailyEl.textContent = `오늘 하루 손익: ${dayPl >= 0 ? "+" : ""}${formatWon(dayPl)}`;
+    dailyPctEl.textContent = `(${dayPlPct >= 0 ? "+" : ""}${dayPlPct.toFixed(2)}%)`;
+
+    const totalCls =
+      totalPl > 0 ? "value-up" : totalPl < 0 ? "value-down" : "value-neutral";
+    const dailyCls =
+      dayPl > 0 ? "value-up" : dayPl < 0 ? "value-down" : "value-neutral";
+    totalEl.className = `asset-sub ${totalCls}`;
+    totalPctEl.className = `asset-pct ${totalCls}`;
+    dailyEl.className = `asset-sub-daily ${dailyCls}`;
+    dailyPctEl.className = `asset-pct ${dailyCls}`;
   }
 
   refreshPortfolioTableCells();
