@@ -2325,30 +2325,40 @@ function candleDateMs(dayIndex, periodStartMin) {
   return d.getTime();
 }
 
-function minDayIndexForChartRange(range) {
-  const d = gameDayIndex;
+function detailChartRangeWindowMs(range) {
+  const DAY_MS = 24 * 60 * 60 * 1000;
   switch (range) {
+    case "d1":
+      return 1 * DAY_MS;
     case "d5":
-      return Math.max(0, d - 4);
+      return 5 * DAY_MS;
     case "w1":
-      return Math.max(0, d - 6);
+      return 7 * DAY_MS;
     case "m1":
-      return Math.max(0, d - 29);
+      return 30 * DAY_MS;
     default:
-      return 0;
+      return null;
   }
 }
 
 function filterCandleRowsForChartRange(rows, range) {
   if (!rows || rows.length === 0) return [];
   if (range === "all") return rows;
-  /** 당일 장중 1분 틱에 대응하는 봉만 (dayIndex === 현재 거래일) */
-  if (range === "d1") {
-    const d = gameDayIndex;
-    return rows.filter((r) => (r.dayIndex ?? 0) === d);
-  }
-  const minDay = minDayIndexForChartRange(range);
-  return rows.filter((r) => (r.dayIndex ?? 0) >= minDay);
+  const winMs = detailChartRangeWindowMs(range);
+  if (!Number.isFinite(winMs) || winMs <= 0) return rows;
+
+  const normalized = rows
+    .map((r) => normalizeCandleRow(r))
+    .filter((r) => Number.isFinite(Number(r?.x)));
+  if (normalized.length === 0) return [];
+
+  const latestTs = normalized.reduce(
+    (m, r) => Math.max(m, Number(r.x)),
+    -Infinity
+  );
+  if (!Number.isFinite(latestTs)) return [];
+  const threshold = latestTs - winMs;
+  return normalized.filter((r) => Number(r.x) >= threshold);
 }
 
 function capDetailChartRows(rows, range) {
