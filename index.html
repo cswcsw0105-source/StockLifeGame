@@ -476,24 +476,51 @@
             aria-labelledby="tab-btn-arena"
           >
             <section class="mts-section mp-dashboard">
-              <h2 class="mts-section-title">개미지옥</h2>
+              <h2 class="mts-section-title">은행 · 플렉스</h2>
               <p class="mts-section-desc mp-dashboard-desc">
-                실시간 매매 피드와 자산 랭킹 — 온라인(Supabase) 접속 시 갱신됩니다.
+                예치·대출로 유동성을 관리하고, 남는 돈은 플렉스 소비로 소각하세요.
               </p>
               <div class="mp-split">
-                <div class="mp-feed-section">
-                  <h3 class="mp-subtitle">실시간 매매 피드</h3>
-                  <ul id="mpTradeFeed" class="mp-feed-list" aria-live="polite"></ul>
-                  <p id="mpFeedOfflineHint" class="mp-offline-hint" hidden>
-                    Supabase 연결 후 실시간 피드를 볼 수 있습니다.
-                  </p>
-                </div>
                 <div class="mp-rank-section">
-                  <h3 class="mp-subtitle">잔혹한 자산 랭킹</h3>
+                  <h3 class="mp-subtitle">잔고 랭킹</h3>
                   <ol id="mpLeaderboard" class="mp-leader-list" start="1"></ol>
                   <p id="mpRankOfflineHint" class="mp-offline-hint" hidden>
                     온라인 모드에서 랭킹이 표시됩니다.
                   </p>
+                </div>
+                <div class="bank-section">
+                  <h3 class="mp-subtitle">제1금융권 은행</h3>
+                  <div class="bank-kpi-grid">
+                    <div class="bank-kpi">
+                      <span class="bank-kpi-label">현재 예치금</span>
+                      <strong id="bankDepositValue" class="bank-kpi-value">₩0</strong>
+                    </div>
+                    <div class="bank-kpi">
+                      <span class="bank-kpi-label">현재 대출금</span>
+                      <strong id="bankLoanValue" class="bank-kpi-value">₩0</strong>
+                    </div>
+                    <div class="bank-kpi">
+                      <span class="bank-kpi-label">오늘 예상 예금 이자</span>
+                      <strong id="bankDepositInterestValue" class="bank-kpi-value">₩0</strong>
+                    </div>
+                    <div class="bank-kpi">
+                      <span class="bank-kpi-label">오늘 예상 대출 이자</span>
+                      <strong id="bankLoanInterestValue" class="bank-kpi-value">₩0</strong>
+                    </div>
+                  </div>
+                  <p id="bankLimitHint" class="mp-offline-hint"></p>
+                  <div class="bank-action-grid">
+                    <input id="bankAmountInput" type="number" min="0" step="1" inputmode="numeric" class="qty-input bank-amount-input" placeholder="금액 입력" />
+                    <button type="button" id="btnBankDeposit" class="btn-mts ghost">예금 넣기</button>
+                    <button type="button" id="btnBankWithdraw" class="btn-mts ghost">예금 출금</button>
+                    <button type="button" id="btnBankBorrow" class="btn-mts buy">대출 실행</button>
+                    <button type="button" id="btnBankRepay" class="btn-mts sell">대출 상환</button>
+                  </div>
+                </div>
+                <div class="flex-shop-section">
+                  <h3 class="mp-subtitle">플렉스 소비 상점</h3>
+                  <p class="mp-offline-hint">구매 즉시 현금이 영구 소각됩니다. 가장 비싼 구매 아이콘이 랭킹 이름 옆에 표시됩니다.</p>
+                  <ul id="flexShopList" class="flex-shop-list"></ul>
                 </div>
               </div>
             </section>
@@ -568,8 +595,8 @@
             aria-selected="false"
             data-tab="arena"
           >
-            <span class="tab-bar-icon" aria-hidden="true">🐜</span>
-            <span class="tab-bar-label">개미지옥</span>
+            <span class="tab-bar-icon" aria-hidden="true">🏦</span>
+            <span class="tab-bar-label">은행·플렉스</span>
           </button>
           <button
             type="button"

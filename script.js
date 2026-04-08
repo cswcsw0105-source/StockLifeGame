@@ -87,6 +87,9 @@ function newsTextForDisplay(it) {
 }
 const NEXT_TRADING_DAY_DELAY_MS = 2200;
 const INITIAL_CAPITAL = 1_000_000;
+const BANK_DAILY_DEPOSIT_RATE = 0.015;
+const BANK_DAILY_LOAN_RATE = 0.08;
+const BANK_MAX_LTV = 0.5;
 /** 게임 캘린더 매월 1일 자동 입금 */
 const MONTHLY_SALARY = 1_000_000;
 /** 이 금액 미만이면 급전 알바 버튼 활성(게임 규칙) */
@@ -104,6 +107,12 @@ const TRADE_FEE_MULT_BUY = 1 + TRADE_FEE_RATE;
 const TRADE_FEE_MULT_SELL = 1 - TRADE_FEE_RATE;
 /** 관심 종목(속보 푸시·피드 필터) 상한 */
 const MAX_WATCHLIST_IDS = 3;
+const FLEX_SHOP_ITEMS = [
+  { id: "rolex", name: "롤렉스 시계", price: 50_000_000, icon: "⌚" },
+  { id: "porsche", name: "포르쉐", price: 300_000_000, icon: "🏎️" },
+  { id: "gangnamApt", name: "강남 아파트", price: 2_000_000_000, icon: "🏢" },
+  { id: "signielPenthouse", name: "시그니엘 펜트하우스", price: 10_000_000_000, icon: "🏙️" },
+];
 
 /** 현실 1초 = 게임 내 1분 */
 const GAME_MINUTES_PER_REAL_SEC = 1;
@@ -166,6 +175,13 @@ let playerProfile = {
   hasReceivedStartingFund: false,
   /** 전일 마감 기준 총자산(현금+평가) */
   previousDayTotalAssets: INITIAL_CAPITAL,
+  /** 은행 예치금/대출금 */
+  bankDeposit: 0,
+  bankLoan: 0,
+  bankDepositRate: BANK_DAILY_DEPOSIT_RATE,
+  bankLoanRate: BANK_DAILY_LOAN_RATE,
+  /** 가장 비싼 플렉스 소비 아이템 */
+  flexTopItemId: "",
 };
 
 let gameClockEverStarted = false;
@@ -206,6 +222,10 @@ const RELIST_ALERT_BEFORE_MS = 60 * 1000;
 const RELIST_BASE_PRICE = 100;
 /** 100명 가상 유저 종목별 잔고(시뮬레이션) */
 const virtualTraderHoldingsByStock = {};
+/** 플레이어/군중 수급 압력(가격 엔진 반영) */
+const tradePressureByStock = {};
+const crowdFomoStateByStock = {};
+const lastShockNewsOrdinalByStock = {};
 
 function clampSafeInteger(n, fallback = 0) {
   const v = Number(n);
@@ -632,6 +652,8 @@ STOCK_SPECS.forEach((spec) => {
   if (!executionFlowByStock[spec.id]) {
     executionFlowByStock[spec.id] = { buyVol: 1, sellVol: 1 };
   }
+  if (tradePressureByStock[spec.id] === undefined) tradePressureByStock[spec.id] = 0;
+  if (!crowdFomoStateByStock[spec.id]) crowdFomoStateByStock[spec.id] = { buyRush: 0, sellPanic: 0 };
 });
 
 function stockSpecById(id) {
@@ -1275,6 +1297,15 @@ async function loadUserFromServer() {
   playerProfile.previousDayTotalAssets = Number.isFinite(Number(prof.previousDayTotalAssets))
     ? Math.max(0, Math.floor(Number(prof.previousDayTotalAssets)))
     : INITIAL_CAPITAL;
+  playerProfile.bankDeposit = Math.max(0, Math.floor(Number(prof.bankDeposit) || 0));
+  playerProfile.bankLoan = Math.max(0, Math.floor(Number(prof.bankLoan) || 0));
+  playerProfile.bankDepositRate = Number(prof.bankDepositRate) > 0
+    ? Number(prof.bankDepositRate)
+    : BANK_DAILY_DEPOSIT_RATE;
+  playerProfile.bankLoanRate = Number(prof.bankLoanRate) > 0
+    ? Number(prof.bankLoanRate)
+    : BANK_DAILY_LOAN_RATE;
+  playerProfile.flexTopItemId = typeof prof.flexTopItemId === "string" ? prof.flexTopItemId : "";
   pendingOrders = Array.isArray(prof.pendingOrders)
     ? prof.pendingOrders.filter(
         (o) =>
@@ -1313,6 +1344,7 @@ async function loadUserFromServer() {
   });
   renderPlayerLoginBadge();
   renderJobScheduleUi();
+  renderBankAndFlexUi();
   ensureTradeLockPolling();
   renderNewsFeedFromServer(serverNewsFeedItems);
   isUserDataLoaded = true;
@@ -1848,6 +1880,7 @@ function closeMarketOnline() {
   if (tickInCandle > 0) {
     sealCurrentCandleAndReset();
   }
+  applyBankDailyAccrual();
   snapshotPreviousDayTotalAssets();
   awaitingDayRoll = true;
   isMarketClosed = true;
@@ -2097,6 +2130,11 @@ async function persistUserNow() {
           0,
           Math.floor(Number(playerProfile.previousDayTotalAssets) || 0)
         ),
+        bankDeposit: bankDepositAmount(),
+        bankLoan: bankLoanAmount(),
+        bankDepositRate: Number(playerProfile.bankDepositRate) || BANK_DAILY_DEPOSIT_RATE,
+        bankLoanRate: Number(playerProfile.bankLoanRate) || BANK_DAILY_LOAN_RATE,
+        flexTopItemId: playerProfile.flexTopItemId || "",
         watchlist: watchlistIds.slice(0, MAX_WATCHLIST_IDS),
         lastSalaryMonthKey: playerProfile.lastSalaryMonthKey || "",
         lastReitDivMonthKey: playerProfile.lastReitDivMonthKey || "",
@@ -3328,6 +3366,52 @@ function netWorth() {
   return clampSafeInteger(clampSafeInteger(game.cash, 0) + portfolioValue(), 0);
 }
 
+function bankDepositAmount() {
+  return Math.max(0, Math.floor(Number(playerProfile.bankDeposit) || 0));
+}
+
+function bankLoanAmount() {
+  return Math.max(0, Math.floor(Number(playerProfile.bankLoan) || 0));
+}
+
+function flexItemById(id) {
+  return FLEX_SHOP_ITEMS.find((x) => x.id === id) || null;
+}
+
+function flexTopItemFromProfile(profileLike) {
+  const pid = profileLike && typeof profileLike === "object" ? profileLike.flexTopItemId : "";
+  return flexItemById(typeof pid === "string" ? pid : "");
+}
+
+function bankBorrowLimit() {
+  const limit = Math.floor(netWorth() * BANK_MAX_LTV) - bankLoanAmount();
+  return Math.max(0, limit);
+}
+
+function applyBankDailyAccrual() {
+  const dep = bankDepositAmount();
+  const loan = bankLoanAmount();
+  const depRate = Number(playerProfile.bankDepositRate) || BANK_DAILY_DEPOSIT_RATE;
+  const loanRate = Number(playerProfile.bankLoanRate) || BANK_DAILY_LOAN_RATE;
+  const depInt = Math.max(0, Math.floor(dep * depRate));
+  const loanInt = Math.max(0, Math.floor(loan * loanRate));
+  if (depInt > 0) {
+    playerProfile.bankDeposit = dep + depInt;
+    addNewsItem(`🏦 [은행] 예금 이자 ${formatWon(depInt)}가 복리로 붙었습니다.`, "news", "", {
+      global: true,
+    });
+  }
+  if (loanInt > 0) {
+    playerProfile.bankLoan = loan + loanInt;
+    addNewsItem(`💣 [은행] 대출 이자 ${formatWon(loanInt)}가 불어나 빚이 커졌습니다.`, "news", "", {
+      global: true,
+    });
+  }
+  if (depInt > 0 || loanInt > 0) {
+    schedulePersistUser();
+  }
+}
+
 function totalStockCost() {
   let t = 0;
   stocks.forEach((s) => {
@@ -3559,6 +3643,7 @@ async function refreshMultiplyLeaderboard() {
     ...r,
     total: r.cash + r.stockVal,
     label: displayNameFromProfile(r.profile, r.login_name),
+    flexTopItem: flexTopItemFromProfile(r.profile),
   }));
   list.sort((a, b) => b.total - a.total);
   ol.innerHTML = "";
@@ -3574,11 +3659,13 @@ async function refreshMultiplyLeaderboard() {
     rankEl.textContent = `${rank}.`;
     const nameEl = document.createElement("span");
     nameEl.className = "mp-leader-name";
-    let prefix = "";
-    let suffix = "";
-    if (n > 1 && rank === 1) prefix = "👑 ";
-    if (n > 1 && rank === n) suffix = " 🪫";
-    nameEl.textContent = `${prefix}${r.label}${suffix}`;
+    nameEl.textContent = r.label;
+    if (r.flexTopItem?.icon) {
+      const badge = document.createElement("span");
+      badge.className = "mp-leader-flex-badge";
+      badge.textContent = r.flexTopItem.icon;
+      nameEl.appendChild(badge);
+    }
     const valEl = document.createElement("span");
     valEl.className = "mp-leader-value";
     valEl.textContent = formatWon(Math.round(r.total));
@@ -3598,10 +3685,8 @@ function scheduleMultiplyLeaderboardRefresh() {
 }
 
 function setMultiplyOfflineHints() {
-  const feedHint = document.getElementById("mpFeedOfflineHint");
   const rankHint = document.getElementById("mpRankOfflineHint");
   const show = !onlineMode || !sb;
-  if (feedHint) feedHint.hidden = !show;
   if (rankHint) rankHint.hidden = !show;
 }
 
@@ -3613,25 +3698,6 @@ function subscribeMultiplayerRealtime() {
   }
   multiplayerChannel = sb
     .channel("multiply_live")
-    .on(
-      "postgres_changes",
-      {
-        event: "INSERT",
-        schema: "public",
-        table: TBL_TRADE_LOGS,
-      },
-      (payload) => {
-        try {
-          const row = payload.new;
-          if (row) {
-            prependMultiplyTradeFeedRow(row);
-            pushTradeLogToast(row);
-          }
-        } catch (e) {
-          console.warn("trade_logs realtime", e);
-        }
-      }
-    )
     .on(
       "postgres_changes",
       {
@@ -3652,7 +3718,6 @@ function subscribeMultiplayerRealtime() {
     )
     .subscribe((status) => {
       if (status === "SUBSCRIBED") {
-        fetchMultiplyTradeLogsInitial();
         scheduleMultiplyLeaderboardRefresh();
       } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
         console.warn("multiply channel", status);
@@ -3694,6 +3759,7 @@ async function buyStock(stockId, quantityRaw, mode = "shares") {
   }
   game.cash = Number(data.cash);
   await loadUserFromServer();
+  addTradePressure(stockId, "buy", q);
   schedulePersistUser();
   await insertTradeLogRow({
     side: "buy",
@@ -3740,6 +3806,7 @@ async function sellStock(stockId, quantityRaw, mode = "shares") {
   }
   game.cash = Number(data.cash);
   await loadUserFromServer();
+  addTradePressure(stockId, "sell", q);
   schedulePersistUser();
   await insertTradeLogRow({
     side: "sell",
@@ -3883,6 +3950,40 @@ function randomSignedDeltaByPct(price, minPct, maxPct) {
   return (Math.random() < 0.5 ? -1 : 1) * mag;
 }
 
+function addTradePressure(stockId, side, qty) {
+  if (!stockId || side == null) return;
+  const q = Math.max(0, Math.floor(Number(qty) || 0));
+  if (q <= 0) return;
+  const sign = side === "buy" ? 1 : -1;
+  tradePressureByStock[stockId] =
+    (Number(tradePressureByStock[stockId]) || 0) + sign * q * 2.2;
+}
+
+function maybeEmitShockTicker(stockId, pctMove) {
+  const absPct = Math.abs(Number(pctMove) || 0);
+  if (absPct < 10) return;
+  const nowOrd = gameTimeOrdinalFromParts(gameDayIndex, gameMinutes);
+  const last = Number(lastShockNewsOrdinalByStock[stockId]) || -Infinity;
+  if (nowOrd - last < 20) return;
+  lastShockNewsOrdinalByStock[stockId] = nowOrd;
+  const nm = getStockById(stockId)?.name || stockId;
+  if (pctMove > 0) {
+    addNewsItem(
+      `🔥 [속보] ${nm} ${pctMove.toFixed(1)}% 폭등! 상한가 근접, 개미들 단체 환호`,
+      "news",
+      "",
+      { stockId, global: true }
+    );
+  } else {
+    addNewsItem(
+      `💀 [긴급] ${nm} ${Math.abs(pctMove).toFixed(1)}% 급락! 투매 발생, 호가창 비명`,
+      "news",
+      "",
+      { stockId, global: true }
+    );
+  }
+}
+
 /**
  * 평상시: 틱당 가격대 비례 무작위 횡보. 뉴스 스파이크: 틱당 대폭 변동.
  * REIT: 정규장 대비 낮은 변동. ETF: 별도 동기화.
@@ -3899,6 +4000,8 @@ function oneMicroPriceStep() {
     }
 
     const gapBlend = openingGapBlendByStock[id];
+    const flowRaw = Number(tradePressureByStock[id]) || 0;
+    tradePressureByStock[id] = flowRaw * 0.82;
     if (gapBlend && typeof gapBlend === "object") {
       const {
         anchor,
@@ -3969,32 +4072,70 @@ function oneMicroPriceStep() {
         delete newsSpikeExtremeTarget[id];
       }
       const up = (newsSpikeDirection[id] ?? 1) >= 0;
-      const absDelta = Math.max(1, Math.floor((s.price || 0) * (0.015 + Math.random() * 0.05)));
+      const absDelta = Math.max(1, Math.floor((s.price || 0) * (0.03 + Math.random() * 0.09)));
       const delta = up ? absDelta : -absDelta;
       s.price = clampStockPrice(s.price + delta);
       if (s.price <= 0) {
         markStockDelisted(id);
       }
+      const pct = prevPrice > 0 ? ((s.price - prevPrice) / prevPrice) * 100 : 0;
+      maybeEmitShockTicker(id, pct);
       recordExecutionFlowTick(id, prevPrice, s.price);
       return;
     }
+
     let delta = 0;
-    if (isReitId(id)) {
-      delta = randomSignedDeltaByPct(s.price, 0.01, 0.03);
+    const buf = candleOhlcBuffer[id];
+    const anchor = Number(buf?.o) || prevPrice || s.price;
+    const pulsePct = anchor > 0 ? ((Number(s.price) - anchor) / anchor) * 100 : 0;
+    const fomoState = crowdFomoStateByStock[id] || { buyRush: 0, sellPanic: 0 };
+    if (pulsePct >= 5.0) {
+      fomoState.buyRush = Math.max(fomoState.buyRush, 2 + Math.floor(Math.random() * 4));
+      fomoState.sellPanic = Math.max(0, fomoState.sellPanic - 1);
+    } else if (pulsePct <= -5.0) {
+      fomoState.sellPanic = Math.max(fomoState.sellPanic, 2 + Math.floor(Math.random() * 4));
+      fomoState.buyRush = Math.max(0, fomoState.buyRush - 1);
     } else {
-      delta = randomSignedDeltaByPct(s.price, 0.01, 0.05);
-      if (Math.random() < 0.08) {
-        const kick = Math.max(1, Math.floor((s.price || 0) * (0.02 + Math.random() * 0.06)));
+      fomoState.buyRush = Math.max(0, fomoState.buyRush - 1);
+      fomoState.sellPanic = Math.max(0, fomoState.sellPanic - 1);
+    }
+    crowdFomoStateByStock[id] = fomoState;
+
+    if (isReitId(id)) {
+      delta = randomSignedDeltaByPct(s.price, 0.02, 0.05);
+    } else {
+      delta = randomSignedDeltaByPct(s.price, 0.03, 0.11);
+      if (Math.random() < 0.2) {
+        const kick = Math.max(1, Math.floor((s.price || 0) * (0.04 + Math.random() * 0.12)));
         delta += (Math.random() < 0.5 ? -1 : 1) * kick;
       }
     }
     if (s.price <= 3 && Math.random() < 0.45) {
       delta -= 1;
     }
+
+    const liquidity = Math.max(3000, Math.floor((Number(s.price) || 0) * 38));
+    const pressureDelta = Math.trunc((flowRaw / liquidity) * Math.max(12, (s.price || 0) * 0.32));
+    delta += pressureDelta;
+
+    if (fomoState.buyRush > 0) {
+      const maniaQty = VIRTUAL_TRADER_COUNT * (40 + Math.floor(Math.random() * 120));
+      const maniaDelta = Math.max(1, Math.floor((maniaQty / liquidity) * Math.max(16, (s.price || 0) * 0.5)));
+      delta += maniaDelta;
+      fomoState.buyRush -= 1;
+    } else if (fomoState.sellPanic > 0) {
+      const panicQty = VIRTUAL_TRADER_COUNT * (50 + Math.floor(Math.random() * 130));
+      const panicDelta = Math.max(1, Math.floor((panicQty / liquidity) * Math.max(18, (s.price || 0) * 0.55)));
+      delta -= panicDelta;
+      fomoState.sellPanic -= 1;
+    }
+
     s.price = clampStockPrice(s.price + delta);
     if (s.price <= 0) {
       markStockDelisted(id);
     }
+    const pct = prevPrice > 0 ? ((s.price - prevPrice) / prevPrice) * 100 : 0;
+    maybeEmitShockTicker(id, pct);
     recordExecutionFlowTick(id, prevPrice, s.price);
   });
   syncEtfPriceFromMarket();
@@ -5489,6 +5630,135 @@ function renderAssetSummary() {
   }
 
   refreshPortfolioTableCells();
+  renderBankAndFlexUi();
+}
+
+function renderFlexShopList() {
+  const ul = document.getElementById("flexShopList");
+  if (!ul) return;
+  ul.innerHTML = "";
+  FLEX_SHOP_ITEMS.forEach((item) => {
+    const li = document.createElement("li");
+    li.className = "flex-shop-item";
+    const left = document.createElement("div");
+    const nm = document.createElement("div");
+    nm.className = "flex-shop-name";
+    nm.textContent = `${item.icon} ${item.name}`;
+    const pr = document.createElement("div");
+    pr.className = "flex-shop-price";
+    pr.textContent = formatWon(item.price);
+    left.appendChild(nm);
+    left.appendChild(pr);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn-mts ghost";
+    btn.textContent = "구매";
+    btn.addEventListener("click", () => {
+      if (game.cash < item.price) {
+        setMessage("예수금이 부족합니다.", "err");
+        return;
+      }
+      game.cash = Math.max(0, Math.floor(game.cash - item.price));
+      const oldItem = flexItemById(playerProfile.flexTopItemId);
+      if (!oldItem || oldItem.price < item.price) {
+        playerProfile.flexTopItemId = item.id;
+      }
+      addNewsItem(`🛍️ [플렉스] ${item.name} 결제 완료! 현금 ${formatWon(item.price)} 영구 소각.`, "news", "", {
+        global: true,
+      });
+      setMessage(`${item.icon} ${item.name} 구매 완료!`, "ok");
+      schedulePersistUser();
+      renderAssetSummary();
+      scheduleMultiplyLeaderboardRefresh();
+    });
+    li.appendChild(left);
+    li.appendChild(btn);
+    ul.appendChild(li);
+  });
+}
+
+function renderBankAndFlexUi() {
+  const dep = bankDepositAmount();
+  const loan = bankLoanAmount();
+  const depRate = Number(playerProfile.bankDepositRate) || BANK_DAILY_DEPOSIT_RATE;
+  const loanRate = Number(playerProfile.bankLoanRate) || BANK_DAILY_LOAN_RATE;
+  const depInt = Math.max(0, Math.floor(dep * depRate));
+  const loanInt = Math.max(0, Math.floor(loan * loanRate));
+  const depEl = document.getElementById("bankDepositValue");
+  const loanEl = document.getElementById("bankLoanValue");
+  const depIntEl = document.getElementById("bankDepositInterestValue");
+  const loanIntEl = document.getElementById("bankLoanInterestValue");
+  const hintEl = document.getElementById("bankLimitHint");
+  if (depEl) depEl.textContent = formatWon(dep);
+  if (loanEl) loanEl.textContent = formatWon(loan);
+  if (depIntEl) depIntEl.textContent = formatWon(depInt);
+  if (loanIntEl) loanIntEl.textContent = formatWon(loanInt);
+  if (hintEl) {
+    hintEl.textContent = `대출 가능 한도: ${formatWon(bankBorrowLimit())} (총자산의 ${(BANK_MAX_LTV * 100).toFixed(0)}% 기준)`;
+  }
+}
+
+function bindBankAndFlexUiOnce() {
+  const root = document.getElementById("tab-arena");
+  if (!root || root.dataset.bankBound === "1") return;
+  root.dataset.bankBound = "1";
+  const amountInput = document.getElementById("bankAmountInput");
+  const readAmt = () => Math.max(0, Math.floor(Number(amountInput?.value) || 0));
+  const btnDeposit = document.getElementById("btnBankDeposit");
+  const btnWithdraw = document.getElementById("btnBankWithdraw");
+  const btnBorrow = document.getElementById("btnBankBorrow");
+  const btnRepay = document.getElementById("btnBankRepay");
+
+  btnDeposit?.addEventListener("click", () => {
+    const amt = readAmt();
+    if (amt <= 0 || game.cash < amt) {
+      setMessage("예금 금액이 올바르지 않거나 예수금이 부족합니다.", "err");
+      return;
+    }
+    game.cash -= amt;
+    playerProfile.bankDeposit = bankDepositAmount() + amt;
+    setMessage(`예금 ${formatWon(amt)}을(를) 예치했습니다.`, "ok");
+    schedulePersistUser();
+    renderAssetSummary();
+  });
+  btnWithdraw?.addEventListener("click", () => {
+    const amt = Math.min(readAmt(), bankDepositAmount());
+    if (amt <= 0) {
+      setMessage("출금 가능한 예치금이 없습니다.", "err");
+      return;
+    }
+    playerProfile.bankDeposit = bankDepositAmount() - amt;
+    game.cash += amt;
+    setMessage(`예금 ${formatWon(amt)}을(를) 출금했습니다.`, "ok");
+    schedulePersistUser();
+    renderAssetSummary();
+  });
+  btnBorrow?.addEventListener("click", () => {
+    const amt = readAmt();
+    const limit = bankBorrowLimit();
+    if (amt <= 0 || amt > limit) {
+      setMessage("대출 가능 한도를 초과했습니다.", "err");
+      return;
+    }
+    playerProfile.bankLoan = bankLoanAmount() + amt;
+    game.cash += amt;
+    setMessage(`대출 ${formatWon(amt)} 실행 완료. 빚 관리 주의!`, "ok");
+    schedulePersistUser();
+    renderAssetSummary();
+  });
+  btnRepay?.addEventListener("click", () => {
+    const amt = Math.min(readAmt(), bankLoanAmount(), Math.max(0, Math.floor(game.cash)));
+    if (amt <= 0) {
+      setMessage("상환 가능한 금액이 없습니다.", "err");
+      return;
+    }
+    playerProfile.bankLoan = bankLoanAmount() - amt;
+    game.cash -= amt;
+    setMessage(`대출 ${formatWon(amt)} 상환 완료.`, "ok");
+    schedulePersistUser();
+    renderAssetSummary();
+  });
+  renderFlexShopList();
 }
 
 function renderCalendarUI() {
@@ -5736,6 +6006,7 @@ function closeMarket() {
   if (tickInCandle > 0) {
     sealCurrentCandleAndReset();
   }
+  applyBankDailyAccrual();
   snapshotPreviousDayTotalAssets();
 
   awaitingDayRoll = true;
@@ -5924,9 +6195,7 @@ function initTabs() {
     if (tab === "arena") {
       setMultiplyOfflineHints();
       scheduleMultiplyLeaderboardRefresh();
-      if (onlineMode && sb) {
-        fetchMultiplyTradeLogsInitial();
-      }
+      renderBankAndFlexUi();
     }
   }
 
@@ -5971,6 +6240,11 @@ async function runSeason2HardReset() {
   game.initialCapital = 1_000_000;
   playerProfile.hasReceivedStartingFund = true;
   playerProfile.previousDayTotalAssets = 1_000_000;
+  playerProfile.bankDeposit = 0;
+  playerProfile.bankLoan = 0;
+  playerProfile.bankDepositRate = BANK_DAILY_DEPOSIT_RATE;
+  playerProfile.bankLoanRate = BANK_DAILY_LOAN_RATE;
+  playerProfile.flexTopItemId = "";
   if (loginDisplayName) writeStartingFundGuard(loginDisplayName);
   game.holdings = {};
   game.costBasis = {};
@@ -5979,6 +6253,9 @@ async function runSeason2HardReset() {
     game.costBasis[spec.id] = 0;
     virtualTraderHoldingsByStock[spec.id] = 0;
     executionFlowByStock[spec.id] = { buyVol: 1, sellVol: 1 };
+    tradePressureByStock[spec.id] = 0;
+    crowdFomoStateByStock[spec.id] = { buyRush: 0, sellPanic: 0 };
+    delete lastShockNewsOrdinalByStock[spec.id];
   });
 
   stocks.forEach((s) => {
@@ -6053,6 +6330,11 @@ function initNewGame() {
   game.initialCapital = INITIAL_CAPITAL;
   game.tradeBlockedUntilMs = 0;
   playerProfile.previousDayTotalAssets = INITIAL_CAPITAL;
+  playerProfile.bankDeposit = 0;
+  playerProfile.bankLoan = 0;
+  playerProfile.bankDepositRate = BANK_DAILY_DEPOSIT_RATE;
+  playerProfile.bankLoanRate = BANK_DAILY_LOAN_RATE;
+  playerProfile.flexTopItemId = "";
   playerProfile.lastSalaryMonthKey =
     getMonthContextForDayIndex(gameDayIndex).monthKey;
 
@@ -6062,6 +6344,9 @@ function initNewGame() {
     delete pendingRelistingByStock[s.id];
     virtualTraderHoldingsByStock[s.id] = 0;
     executionFlowByStock[s.id] = { buyVol: 1, sellVol: 1 };
+    tradePressureByStock[s.id] = 0;
+    crowdFomoStateByStock[s.id] = { buyRush: 0, sellPanic: 0 };
+    delete lastShockNewsOrdinalByStock[s.id];
   });
   resetNewsSpikeState();
 
@@ -6109,6 +6394,7 @@ async function runGameBootstrap() {
   bindDetailChartRangeUiOnce();
   bindDetailChartTypeToggleOnce();
   bindMarketListFilterUiOnce();
+  bindBankAndFlexUiOnce();
 
   bindLifeUi();
   bindCharacterSetup();

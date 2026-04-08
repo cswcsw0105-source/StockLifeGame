@@ -135,8 +135,8 @@ function buildImpacts(mode, aId, bId) {
       };
     case "both-up-jackpot":
       return {
-        [aId]: randomPct(0.45, 0.75, 1),
-        [bId]: randomPct(0.45, 0.75, 1),
+        [aId]: randomPct(1.5, 3.0, 1),
+        [bId]: randomPct(1.5, 3.0, 1),
       };
     default:
       return {
