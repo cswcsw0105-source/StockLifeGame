@@ -561,6 +561,9 @@ const stocks = STOCK_SPECS.map((spec) => ({
 }));
 STOCK_SPECS.forEach((spec) => {
   if (delistedStocks[spec.id] === undefined) delistedStocks[spec.id] = false;
+  if (!executionFlowByStock[spec.id]) {
+    executionFlowByStock[spec.id] = { buyVol: 1, sellVol: 1 };
+  }
 });
 
 function stockSpecById(id) {
@@ -672,6 +675,17 @@ const DETAIL_CHART_MAX_POINTS = {
   all: 1800,
 };
 const DETAIL_CHART_SAMPLE_MAX_POINTS = 120;
+const DETAIL_CHART_AGG_FACTOR_BY_RANGE = {
+  d1: 1,
+  d5: 2, // 20분봉
+  w1: 3, // 30분봉
+  m1: 6, // 60분봉
+  all: 8, // 80분봉
+};
+
+/** 체결강도(100명 가상 유저 틱) */
+const VIRTUAL_TRADER_COUNT = 100;
+const executionFlowByStock = {};
 /** 상세 차트: candle | line */
 let detailChartType = "candle";
 /** 종목 상세 현재가 표시 직전 가격(틱 애니메이션) */
@@ -1160,6 +1174,7 @@ async function loadUserFromServer() {
     game.costBasis[spec.id] = 0;
     delistedStocks[spec.id] = false;
     delete pendingRelistingByStock[spec.id];
+    executionFlowByStock[spec.id] = { buyVol: 1, sellVol: 1 };
   });
   (ports || []).forEach((p) => {
     game.holdings[p.symbol] = Math.max(0, Math.floor(Number(p.shares)));
@@ -2286,7 +2301,10 @@ function normalizeCandleRow(r) {
     dayIndex,
     periodStartMin,
     gameTimeOrdinal,
-    x: r.x || formatCandleXLabel(dayIndex, periodStartMin),
+    x:
+      typeof r.x === "number" && Number.isFinite(r.x)
+        ? r.x
+        : candleDateMs(dayIndex, periodStartMin),
     o: clampStockPrice(r.o),
     h: clampStockPrice(r.h),
     l: clampStockPrice(r.l),
@@ -2298,6 +2316,13 @@ function normalizeCandleRow(r) {
 function formatCandleXLabel(dayIndex, periodStartMin) {
   const { month, day } = getCalendarParts(dayIndex);
   return `${month}/${day} ${formatMinuteOfDay(periodStartMin)}`;
+}
+
+function candleDateMs(dayIndex, periodStartMin) {
+  const d = new Date(2000, 3, 1, 0, 0, 0, 0);
+  d.setDate(d.getDate() + Math.floor(Number(dayIndex) || 0));
+  d.setMinutes(Math.floor(Number(periodStartMin) || 0), 0, 0);
+  return d.getTime();
 }
 
 function minDayIndexForChartRange(range) {
@@ -2353,6 +2378,91 @@ function getFilteredCandleHistory(stockId) {
   const range = detailChartRange || "all";
   const filtered = filterCandleRowsForChartRange(raw, range);
   return capDetailChartRows(filtered, range);
+}
+
+function isValidCandleRow(r) {
+  if (!r || typeof r !== "object") return false;
+  const nums = [r.o, r.h, r.l, r.c];
+  if (!nums.every((v) => Number.isFinite(Number(v)))) return false;
+  return Number.isFinite(Number(r.gameTimeOrdinal));
+}
+
+function aggFactorForDetailRange(range) {
+  return DETAIL_CHART_AGG_FACTOR_BY_RANGE[range] || 1;
+}
+
+function aggregateCandleRows(rows, factor) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  const f = Math.max(1, Math.floor(Number(factor) || 1));
+  if (f <= 1) return rows.slice();
+  const out = [];
+  for (let i = 0; i < rows.length; i += f) {
+    const grp = rows.slice(i, i + f);
+    if (grp.length === 0) continue;
+    const first = grp[0];
+    const last = grp[grp.length - 1];
+    const o = Number(first.o);
+    const c = Number(last.c);
+    let h = -Infinity;
+    let l = Infinity;
+    let v = 0;
+    grp.forEach((r) => {
+      h = Math.max(h, Number(r.h));
+      l = Math.min(l, Number(r.l));
+      v += Number(r.v) || 0;
+    });
+    out.push(
+      normalizeCandleRow({
+        dayIndex: last.dayIndex,
+        periodStartMin: last.periodStartMin,
+        gameTimeOrdinal: last.gameTimeOrdinal,
+        x: candleDateMs(last.dayIndex, last.periodStartMin),
+        o,
+        h,
+        l,
+        c,
+        v: Math.max(1, Math.floor(v)),
+      })
+    );
+  }
+  return out;
+}
+
+function buildPreparedDetailRows(stockId) {
+  const range = detailChartRange || "all";
+  const hist = getFilteredCandleHistory(stockId)
+    .filter((r) => isValidCandleRow(r))
+    .sort((a, b) => Number(a.gameTimeOrdinal) - Number(b.gameTimeOrdinal));
+  const rows = hist.map((r) => normalizeCandleRow({ ...r }));
+  if (
+    tickInCandle > 0 &&
+    isTradingWindowActive() &&
+    gameMinutes < MARKET_CLOSE_MIN &&
+    candleOhlcBuffer[stockId]
+  ) {
+    const b = candleOhlcBuffer[stockId];
+    const s = getStockById(stockId);
+    if (s) {
+      rows.push(
+        normalizeCandleRow({
+          dayIndex: gameDayIndex,
+          periodStartMin: candlePeriodStartMin,
+          gameTimeOrdinal: gameTimeOrdinalFromParts(
+            gameDayIndex,
+            candlePeriodStartMin
+          ),
+          x: candleDateMs(gameDayIndex, candlePeriodStartMin),
+          o: Math.floor(b.o),
+          h: Math.floor(Math.max(b.h, s.price)),
+          l: Math.floor(Math.min(b.l, s.price)),
+          c: Math.floor(s.price),
+          v: estimatePartialBarVolume(stockId),
+        })
+      );
+    }
+  }
+  const aggregated = aggregateCandleRows(rows, aggFactorForDetailRange(range));
+  return sampleRowsForDetailChart(aggregated);
 }
 
 function getAvgCostForStock(stockId) {
@@ -2839,6 +2949,29 @@ function buildOrderBookLevels(stockId) {
   return { asks, bids, tick };
 }
 
+function recordExecutionFlowTick(stockId, prevPrice, nextPrice) {
+  if (!stockId) return;
+  if (!executionFlowByStock[stockId]) {
+    executionFlowByStock[stockId] = { buyVol: 1, sellVol: 1 };
+  }
+  const flow = executionFlowByStock[stockId];
+  flow.buyVol = Math.max(1, flow.buyVol * 0.86);
+  flow.sellVol = Math.max(1, flow.sellVol * 0.86);
+
+  const prev = Number(prevPrice);
+  const next = Number(nextPrice);
+  const momentum =
+    Number.isFinite(prev) && prev > 0 && Number.isFinite(next)
+      ? (next - prev) / prev
+      : 0;
+  const buyBias = Math.min(0.88, Math.max(0.12, 0.5 + momentum * 7.2));
+  for (let i = 0; i < VIRTUAL_TRADER_COUNT; i += 1) {
+    const qty = 1 + Math.floor(Math.random() * 14);
+    if (Math.random() < buyBias) flow.buyVol += qty;
+    else flow.sellVol += qty;
+  }
+}
+
 function updateOrderBookAndStrength(stockId) {
   const wrap = document.getElementById("detailOrderBookRows");
   const bar = document.getElementById("detailExecStrengthBar");
@@ -2848,16 +2981,10 @@ function updateOrderBookAndStrength(stockId) {
   const s = getStockById(stockId);
   if (!s) return;
 
-  const prev = prevTickPrice[stockId];
-  let strength;
-  if (prev === undefined || prev === s.price) {
-    strength = 95 + pseudo01(gameDayIndex + stockId.length * 31) * 10;
-  } else if (s.price > prev) {
-    strength = 100 + Math.random() * 35;
-  } else {
-    strength = 55 + Math.random() * 44;
-  }
-  const pct = Math.round(strength * 10) / 10;
+  const flow = executionFlowByStock[stockId] || { buyVol: 1, sellVol: 1 };
+  const buyVol = Math.max(1, Number(flow.buyVol) || 1);
+  const sellVol = Math.max(1, Number(flow.sellVol) || 1);
+  const pct = Math.round((buyVol / sellVol) * 1000) / 10;
   pctEl.textContent = `${pct.toFixed(1)}%`;
   const barW = Math.min(150, Math.max(40, pct));
   bar.style.width = `${(barW / 150) * 100}%`;
@@ -3511,8 +3638,10 @@ function oneMicroPriceStep() {
   stocks.forEach((s) => {
     const id = s.id;
     if (isEtfId(id)) return;
+    const prevPrice = Number(s.price);
     if (delistedStocks[id]) {
       s.price = 0;
+      recordExecutionFlowTick(id, prevPrice, s.price);
       return;
     }
 
@@ -3539,6 +3668,7 @@ function oneMicroPriceStep() {
         if (s.price <= 0) {
           markStockDelisted(id);
           delete openingGapBlendByStock[id];
+          recordExecutionFlowTick(id, prevPrice, s.price);
           return;
         }
         if (ni >= ts) {
@@ -3546,6 +3676,7 @@ function oneMicroPriceStep() {
         } else {
           gapBlend.nextIdx = ni + 1;
         }
+        recordExecutionFlowTick(id, prevPrice, s.price);
         return;
       }
       delete openingGapBlendByStock[id];
@@ -3571,12 +3702,14 @@ function oneMicroPriceStep() {
             markStockDelisted(id);
             newsSpikeMode[id] = "normal";
             delete newsSpikeExtremeTarget[id];
+            recordExecutionFlowTick(id, prevPrice, s.price);
             return;
           }
           if (leftAfter <= 0) {
             newsSpikeMode[id] = "normal";
             delete newsSpikeExtremeTarget[id];
           }
+          recordExecutionFlowTick(id, prevPrice, s.price);
           return;
         }
         newsSpikeMode[id] = "normal";
@@ -3589,6 +3722,7 @@ function oneMicroPriceStep() {
       if (s.price <= 0) {
         markStockDelisted(id);
       }
+      recordExecutionFlowTick(id, prevPrice, s.price);
       return;
     }
     let delta = 0;
@@ -3608,6 +3742,7 @@ function oneMicroPriceStep() {
     if (s.price <= 0) {
       markStockDelisted(id);
     }
+    recordExecutionFlowTick(id, prevPrice, s.price);
   });
   syncEtfPriceFromMarket();
 }
@@ -3791,8 +3926,7 @@ function estimatePartialBarVolume(stockId) {
 
 function buildCandleSeriesData(stockId) {
   if (delistedStocks[stockId]) return [];
-  const hist = getFilteredCandleHistory(stockId);
-  const rows = hist.map((r) => ({
+  const rows = buildPreparedDetailRows(stockId).map((r) => ({
     x: r.x,
     y: [
       Math.floor(r.o),
@@ -3801,37 +3935,18 @@ function buildCandleSeriesData(stockId) {
       Math.floor(r.c),
     ],
   }));
-  if (
-    tickInCandle > 0 &&
-    isTradingWindowActive() &&
-    gameMinutes < MARKET_CLOSE_MIN &&
-    candleOhlcBuffer[stockId]
-  ) {
-    const b = candleOhlcBuffer[stockId];
-    const s = getStockById(stockId);
-    if (s) {
-      const o = b.o;
-      const h = Math.max(b.h, s.price);
-      const l = Math.min(b.l, s.price);
-      const c = s.price;
-      rows.push({
-        x: formatCandleXLabel(gameDayIndex, candlePeriodStartMin),
-        y: [
-          Math.floor(o),
-          Math.floor(h),
-          Math.floor(l),
-          Math.floor(c),
-        ],
-      });
-    }
-  }
-  return sampleRowsForDetailChart(rows);
+  return rows.filter(
+    (p) =>
+      Number.isFinite(Number(p.x)) &&
+      Array.isArray(p.y) &&
+      p.y.length === 4 &&
+      p.y.every((v) => Number.isFinite(Number(v)))
+  );
 }
 
 function buildVolumeSeriesData(stockId) {
   if (delistedStocks[stockId]) return [];
-  const hist = getFilteredCandleHistory(stockId);
-  const rows = hist.map((r) => {
+  const rows = buildPreparedDetailRows(stockId).map((r) => {
     const up = r.c >= r.o;
     return {
       x: r.x,
@@ -3839,39 +3954,17 @@ function buildVolumeSeriesData(stockId) {
       fillColor: up ? CANDLE_UP : CANDLE_DOWN,
     };
   });
-  if (
-    tickInCandle > 0 &&
-    isTradingWindowActive() &&
-    gameMinutes < MARKET_CLOSE_MIN &&
-    candleOhlcBuffer[stockId]
-  ) {
-    const b = candleOhlcBuffer[stockId];
-    const s = getStockById(stockId);
-    if (s) {
-      const o = b.o;
-      const c = s.price;
-      rows.push({
-        x: formatCandleXLabel(gameDayIndex, candlePeriodStartMin),
-        y: estimatePartialBarVolume(stockId),
-        fillColor: c >= o ? CANDLE_UP : CANDLE_DOWN,
-      });
-    }
-  }
-  return sampleRowsForDetailChart(rows);
+  return rows.filter((p) => Number.isFinite(Number(p.x)) && Number.isFinite(Number(p.y)));
 }
 
-/**
- * 캔들 시리즈는 ApexCharts에서 `{ x, y: [O,H,L,C] }` 형태가 안정적으로 렌더링됨.
- * categories는 xaxis와 동일 순서로 유지.
- */
 function getDetailChartCategoriesAndCandleSeries(stockId) {
   const points = buildCandleSeriesData(stockId);
   const candleSeriesData = points.map((p) => ({
-    x: String(p.x),
+    x: Number(p.x),
     y: p.y,
   }));
   return {
-    categories: points.map((p) => String(p.x)),
+    categories: points.map((p) => Number(p.x)),
     candleSeriesData,
   };
 }
@@ -3879,27 +3972,11 @@ function getDetailChartCategoriesAndCandleSeries(stockId) {
 /** 종가 기준 선차트 — X 라벨은 캔들과 동일한 시계열 */
 function buildLineSeriesData(stockId) {
   if (delistedStocks[stockId]) return [];
-  const hist = getFilteredCandleHistory(stockId);
-  const rows = hist.map((r) => ({
+  const rows = buildPreparedDetailRows(stockId).map((r) => ({
     x: r.x,
     y: Math.floor(r.c),
   }));
-  if (
-    tickInCandle > 0 &&
-    isTradingWindowActive() &&
-    gameMinutes < MARKET_CLOSE_MIN &&
-    candleOhlcBuffer[stockId]
-  ) {
-    const b = candleOhlcBuffer[stockId];
-    const s = getStockById(stockId);
-    if (s) {
-      rows.push({
-        x: formatCandleXLabel(gameDayIndex, candlePeriodStartMin),
-        y: Math.floor(s.price),
-      });
-    }
-  }
-  return sampleRowsForDetailChart(rows);
+  return rows.filter((p) => Number.isFinite(Number(p.x)) && Number.isFinite(Number(p.y)));
 }
 
 function detailLineStrokeColor(stockId) {
@@ -3946,14 +4023,25 @@ function computeDetailChartYBounds(stockId) {
 }
 
 /** 상세 차트 X축 — 고정 옵션(Apex category + tickAmount 조합 오류 방지) */
-function detailChartXaxisConfig(categories) {
+function detailChartDatetimeFormatter(value) {
+  const ms = Number(value);
+  if (!Number.isFinite(ms)) return "";
+  const d = new Date(ms);
+  const mm = d.getMonth() + 1;
+  const dd = d.getDate();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  return `${mm}/${dd} ${hh}:${mi}`;
+}
+
+function detailChartXaxisConfig() {
   return {
-    type: "category",
-    categories: Array.isArray(categories) ? categories : [],
+    type: "datetime",
     tickAmount: 6,
     labels: {
       rotate: -45,
       hideOverlappingLabels: true,
+      formatter: detailChartDatetimeFormatter,
       style: { colors: "#8b95a8", fontSize: "8px" },
       maxHeight: 80,
     },
@@ -3963,13 +4051,13 @@ function detailChartXaxisConfig(categories) {
 }
 
 /** tickAmount 제외 — 렌더 실패 시 재시도용 */
-function detailChartXaxisConfigFallback(categories) {
+function detailChartXaxisConfigFallback() {
   return {
-    type: "category",
-    categories: Array.isArray(categories) ? categories : [],
+    type: "datetime",
     labels: {
       rotate: -45,
       hideOverlappingLabels: true,
+      formatter: detailChartDatetimeFormatter,
       style: { colors: "#8b95a8", fontSize: "8px" },
       maxHeight: 80,
     },
@@ -4042,7 +4130,7 @@ function buildDetailChartMainAndVolOpts(stockId, xa) {
   const { candleSeriesData } = getDetailChartCategoriesAndCandleSeries(stockId);
   const volPts = buildVolumeSeriesData(stockId);
   const volData = volPts.map((p) => ({
-    x: String(p.x),
+    x: Number(p.x),
     y: p.y,
     fillColor: p.fillColor,
   }));
@@ -4054,7 +4142,7 @@ function buildDetailChartMainAndVolOpts(stockId, xa) {
     const linePts = buildLineSeriesData(stockId);
     const lineColor = detailLineStrokeColor(stockId);
     const lineData = linePts.map((p) => ({
-      x: String(p.x),
+      x: Number(p.x),
       y: p.y,
     }));
     const lineBase = apexCommonChartOpts(210, "line");
@@ -4166,8 +4254,7 @@ function initDetailCharts(stockId) {
   cEl.innerHTML = "";
   vEl.innerHTML = "";
 
-  const { categories } = getDetailChartCategoriesAndCandleSeries(stockId);
-  const xaPrimary = detailChartXaxisConfig(categories);
+  const xaPrimary = detailChartXaxisConfig();
 
   const renderPair = (xa) => {
     const { mainOpts, volOpts } = buildDetailChartMainAndVolOpts(stockId, xa);
@@ -4188,7 +4275,7 @@ function initDetailCharts(stockId) {
       destroyDetailCharts();
       cEl.innerHTML = "";
       vEl.innerHTML = "";
-      renderPair(detailChartXaxisConfigFallback(categories));
+      renderPair(detailChartXaxisConfigFallback());
     } catch (e2) {
       console.warn("initDetailCharts (fallback xaxis)", e2?.message || e2);
       apexDetail.candle = null;
@@ -4202,23 +4289,23 @@ function refreshDetailChart() {
   if (!selectedStockId || !apexDetail.candle || !apexDetail.vol) return;
   const id = selectedStockId;
   if (delistedStocks[id]) return;
-  const { categories, candleSeriesData } = getDetailChartCategoriesAndCandleSeries(id);
+  const { candleSeriesData } = getDetailChartCategoriesAndCandleSeries(id);
   const volPts = buildVolumeSeriesData(id);
   const volData = volPts.map((p) => ({
-    x: String(p.x),
+    x: Number(p.x),
     y: p.y,
     fillColor: p.fillColor,
   }));
   const yb = computeDetailChartYBounds(id);
   const ann = buildDetailChartAnnotations(id);
-  const xaxisShared = detailChartXaxisConfig(categories);
+  const xaxisShared = detailChartXaxisConfig();
 
   try {
     if (detailChartType === "line") {
       const linePts = buildLineSeriesData(id);
       const lineColor = detailLineStrokeColor(id);
       const lineData = linePts.map((p) => ({
-        x: String(p.x),
+        x: Number(p.x),
         y: p.y,
       }));
       apexDetail.candle.updateSeries([{ name: id, data: lineData }], true);
@@ -5621,6 +5708,7 @@ function initNewGame() {
     s.price = randomInitialPrice();
     delistedStocks[s.id] = false;
     delete pendingRelistingByStock[s.id];
+    executionFlowByStock[s.id] = { buyVol: 1, sellVol: 1 };
   });
   resetNewsSpikeState();
 
