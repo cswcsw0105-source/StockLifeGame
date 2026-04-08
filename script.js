@@ -90,6 +90,10 @@ const INITIAL_CAPITAL = 1_000_000;
 const BANK_DAILY_DEPOSIT_RATE = 0.015;
 const BANK_DAILY_LOAN_RATE = 0.08;
 const BANK_MAX_LTV = 0.5;
+const DAILY_DIVIDEND_MIN_PRICE = 500;
+const DAILY_DIVIDEND_PER_SHARE = 2;
+const RATIONAL_TRADER_RATIO = 0.5;
+const MAX_DELIST_PER_TICK = 2;
 /** 게임 캘린더 매월 1일 자동 입금 */
 const MONTHLY_SALARY = 1_000_000;
 /** 이 금액 미만이면 급전 알바 버튼 활성(게임 규칙) */
@@ -112,6 +116,11 @@ const FLEX_SHOP_ITEMS = [
   { id: "porsche", name: "포르쉐", price: 300_000_000, icon: "🏎️" },
   { id: "gangnamApt", name: "강남 아파트", price: 2_000_000_000, icon: "🏢" },
   { id: "signielPenthouse", name: "시그니엘 펜트하우스", price: 10_000_000_000, icon: "🏙️" },
+];
+const MARKET_TEMPERATURE_WEIGHTS = [
+  { key: "hot", w: 0.2 },
+  { key: "stable", w: 0.6 },
+  { key: "cold", w: 0.2 },
 ];
 
 /** 현실 1초 = 게임 내 1분 */
@@ -728,6 +737,33 @@ function rollExtremeNewsKnock(stockId, positive) {
   }
 }
 
+function pickWeightedMarketTemperature() {
+  const total = MARKET_TEMPERATURE_WEIGHTS.reduce((a, b) => a + b.w, 0);
+  let r = Math.random() * total;
+  for (const it of MARKET_TEMPERATURE_WEIGHTS) {
+    r -= it.w;
+    if (r <= 0) return it.key;
+  }
+  return "stable";
+}
+
+function marketTemperatureLabel(key = marketTemperature) {
+  if (key === "hot") return "과열기";
+  if (key === "cold") return "침체기";
+  return "안정기";
+}
+
+function setMarketTemperature(next, reason = "") {
+  const allowed = next === "hot" || next === "stable" || next === "cold";
+  const nv = allowed ? next : "stable";
+  if (marketTemperature === nv) return;
+  marketTemperature = nv;
+  const rs = reason ? ` · ${reason}` : "";
+  addNewsItem(`🌡️ [시장 온도] ${marketTemperatureLabel(nv)} 진입${rs}`, "news", "", {
+    global: true,
+  });
+}
+
 function scheduleNewsSpikeFromImpacts(impacts) {
   if (!impacts || typeof impacts !== "object") return;
   Object.entries(impacts).forEach(([id, raw]) => {
@@ -782,6 +818,7 @@ let detailLastShownPrice = null;
 let watchlistIds = [];
 /** 시장 리스트 필터: all | mine */
 let marketListFilterMode = "all";
+let marketTemperature = "stable";
 
 function GAME_ANCHOR_DATE() {
   return new Date(2000, 3, 1);
@@ -1881,6 +1918,7 @@ function closeMarketOnline() {
     sealCurrentCandleAndReset();
   }
   applyBankDailyAccrual();
+  applyDailyStockDividends();
   snapshotPreviousDayTotalAssets();
   awaitingDayRoll = true;
   isMarketClosed = true;
@@ -1908,6 +1946,7 @@ function openNextTradingDayOnline() {
   ensureCalendarHorizon();
   fireDueCalendarEvents();
   maybeApplyMonthlySalary();
+  setMarketTemperature(pickWeightedMarketTemperature(), "일일 시장 순환");
   const { month, day } = getCalendarParts(gameDayIndex);
   addNewsItem(
     `${month}월 ${day}일 08:00 — 장 시작 전 · 프리마켓 뉴스를 확인하세요`,
@@ -3412,6 +3451,27 @@ function applyBankDailyAccrual() {
   }
 }
 
+function applyDailyStockDividends() {
+  let totalDiv = 0;
+  stocks.forEach((s) => {
+    if (isEtfId(s.id)) return;
+    if (delistedStocks[s.id]) return;
+    if (Math.floor(Number(s.price) || 0) < DAILY_DIVIDEND_MIN_PRICE) return;
+    const q = Math.max(0, Math.floor(Number(game.holdings[s.id] || 0)));
+    if (q <= 0) return;
+    totalDiv += q * DAILY_DIVIDEND_PER_SHARE;
+  });
+  if (totalDiv <= 0) return;
+  game.cash = Math.max(0, Math.floor(Number(game.cash) || 0) + totalDiv);
+  addNewsItem(
+    `💸 [일일 배당] 보유 주식 배당금 ${formatWon(totalDiv)} 지급 완료`,
+    "dividend",
+    "",
+    { global: true }
+  );
+  schedulePersistUser();
+}
+
 function totalStockCost() {
   let t = 0;
   stocks.forEach((s) => {
@@ -3961,7 +4021,7 @@ function addTradePressure(stockId, side, qty) {
 
 function maybeEmitShockTicker(stockId, pctMove) {
   const absPct = Math.abs(Number(pctMove) || 0);
-  if (absPct < 10) return;
+  if (absPct < 30) return;
   const nowOrd = gameTimeOrdinalFromParts(gameDayIndex, gameMinutes);
   const last = Number(lastShockNewsOrdinalByStock[stockId]) || -Infinity;
   if (nowOrd - last < 20) return;
@@ -3984,11 +4044,34 @@ function maybeEmitShockTicker(stockId, pctMove) {
   }
 }
 
+function maybeRescueDelistCandidate(stockId) {
+  const s = getStockById(stockId);
+  if (!s || delistedStocks[stockId]) return false;
+  const px = Math.max(0, Math.floor(Number(s.price) || 0));
+  if (px > 100) return false;
+  const p = marketTemperature === "hot" ? 0.2 : marketTemperature === "cold" ? 0.5 : 0.35;
+  if (Math.random() >= p) return false;
+  const isMna = Math.random() < 0.5;
+  const jumpPct = isMna ? 0.7 + Math.random() * 1.1 : 0.35 + Math.random() * 0.7;
+  const base = Math.max(100, px);
+  s.price = clampStockPrice(base + Math.max(20, Math.floor(base * jumpPct)));
+  addNewsItem(
+    isMna
+      ? `🚨 [긴급] ${s.name} 적대적 M&A설 급부상! 상장폐지 위기서 극적 반등`
+      : `🏦 [긴급지원] ${s.name} 상장 유지 지원금 투입! 급한 불 진화`,
+    "news",
+    "",
+    { stockId, global: true }
+  );
+  return true;
+}
+
 /**
  * 평상시: 틱당 가격대 비례 무작위 횡보. 뉴스 스파이크: 틱당 대폭 변동.
  * REIT: 정규장 대비 낮은 변동. ETF: 별도 동기화.
  */
 function oneMicroPriceStep() {
+  let delistedThisTick = 0;
   stocks.forEach((s) => {
     const id = s.id;
     if (isEtfId(id)) return;
@@ -4076,7 +4159,15 @@ function oneMicroPriceStep() {
       const delta = up ? absDelta : -absDelta;
       s.price = clampStockPrice(s.price + delta);
       if (s.price <= 0) {
-        markStockDelisted(id);
+        const rescued = maybeRescueDelistCandidate(id);
+        if (!rescued) {
+          if (delistedThisTick < MAX_DELIST_PER_TICK) {
+            markStockDelisted(id);
+            delistedThisTick += 1;
+          } else {
+            s.price = 1;
+          }
+        }
       }
       const pct = prevPrice > 0 ? ((s.price - prevPrice) / prevPrice) * 100 : 0;
       maybeEmitShockTicker(id, pct);
@@ -4101,12 +4192,17 @@ function oneMicroPriceStep() {
     }
     crowdFomoStateByStock[id] = fomoState;
 
+    const volScale =
+      marketTemperature === "hot" ? 1.35 : marketTemperature === "cold" ? 0.72 : 1.0;
     if (isReitId(id)) {
-      delta = randomSignedDeltaByPct(s.price, 0.02, 0.05);
+      delta = randomSignedDeltaByPct(s.price, 0.02 * volScale, 0.05 * volScale);
     } else {
-      delta = randomSignedDeltaByPct(s.price, 0.03, 0.11);
-      if (Math.random() < 0.2) {
-        const kick = Math.max(1, Math.floor((s.price || 0) * (0.04 + Math.random() * 0.12)));
+      delta = randomSignedDeltaByPct(s.price, 0.02 * volScale, 0.085 * volScale);
+      if (Math.random() < (marketTemperature === "hot" ? 0.2 : 0.12)) {
+        const kick = Math.max(
+          1,
+          Math.floor((s.price || 0) * ((0.03 + Math.random() * 0.08) * volScale))
+        );
         delta += (Math.random() < 0.5 ? -1 : 1) * kick;
       }
     }
@@ -4118,21 +4214,37 @@ function oneMicroPriceStep() {
     const pressureDelta = Math.trunc((flowRaw / liquidity) * Math.max(12, (s.price || 0) * 0.32));
     delta += pressureDelta;
 
+    const irrationalCount = Math.max(1, Math.floor(VIRTUAL_TRADER_COUNT * (1 - RATIONAL_TRADER_RATIO)));
+    const rationalCount = Math.max(1, VIRTUAL_TRADER_COUNT - irrationalCount);
     if (fomoState.buyRush > 0) {
-      const maniaQty = VIRTUAL_TRADER_COUNT * (40 + Math.floor(Math.random() * 120));
+      const maniaQty = irrationalCount * (30 + Math.floor(Math.random() * 90));
       const maniaDelta = Math.max(1, Math.floor((maniaQty / liquidity) * Math.max(16, (s.price || 0) * 0.5)));
       delta += maniaDelta;
+      const rationalTakeProfitQty = rationalCount * (20 + Math.floor(Math.random() * 70));
+      const rationalDelta = Math.max(1, Math.floor((rationalTakeProfitQty / liquidity) * Math.max(10, (s.price || 0) * 0.28)));
+      delta -= rationalDelta;
       fomoState.buyRush -= 1;
     } else if (fomoState.sellPanic > 0) {
-      const panicQty = VIRTUAL_TRADER_COUNT * (50 + Math.floor(Math.random() * 130));
+      const panicQty = irrationalCount * (35 + Math.floor(Math.random() * 100));
       const panicDelta = Math.max(1, Math.floor((panicQty / liquidity) * Math.max(18, (s.price || 0) * 0.55)));
       delta -= panicDelta;
+      const rationalDipBuyQty = rationalCount * (20 + Math.floor(Math.random() * 80));
+      const rationalDelta = Math.max(1, Math.floor((rationalDipBuyQty / liquidity) * Math.max(10, (s.price || 0) * 0.25)));
+      delta += rationalDelta;
       fomoState.sellPanic -= 1;
     }
 
     s.price = clampStockPrice(s.price + delta);
     if (s.price <= 0) {
-      markStockDelisted(id);
+      const rescued = maybeRescueDelistCandidate(id);
+      if (!rescued) {
+        if (delistedThisTick < MAX_DELIST_PER_TICK) {
+          markStockDelisted(id);
+          delistedThisTick += 1;
+        } else {
+          s.price = 1;
+        }
+      }
     }
     const pct = prevPrice > 0 ? ((s.price - prevPrice) / prevPrice) * 100 : 0;
     maybeEmitShockTicker(id, pct);
@@ -5841,6 +5953,13 @@ function fireDueCalendarEvents() {
     });
     setMessage(`경제 일정 · ${ev.title}`, "ok");
     applyCalendarEventPayload(ev);
+    if (typeof ev.title === "string") {
+      if (ev.title.includes("금리") && (ev.title.includes("인상") || ev.title.includes("긴축"))) {
+        setMarketTemperature("cold", "금리 이슈 반영");
+      } else if (ev.title.includes("금리") && (ev.title.includes("인하") || ev.title.includes("완화"))) {
+        setMarketTemperature("hot", "금리 완화 기대");
+      }
+    }
   });
 }
 
@@ -5995,6 +6114,7 @@ function openNextTradingDay() {
   fireDueCalendarEvents();
 
   maybeApplyMonthlySalary();
+  setMarketTemperature(pickWeightedMarketTemperature(), "일일 시장 순환");
 
   finishRollToPreMarketDay();
 }
@@ -6007,6 +6127,7 @@ function closeMarket() {
     sealCurrentCandleAndReset();
   }
   applyBankDailyAccrual();
+  applyDailyStockDividends();
   snapshotPreviousDayTotalAssets();
 
   awaitingDayRoll = true;
