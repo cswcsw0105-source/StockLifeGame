@@ -110,33 +110,33 @@ function buildImpacts(mode, aId, bId) {
   switch (mode) {
     case "both-up-strong":
       return {
-        [aId]: randomPct(0.2, 0.3, 1),
-        [bId]: randomPct(0.2, 0.3, 1),
+        [aId]: randomPct(0.08, 0.14, 1),
+        [bId]: randomPct(0.08, 0.14, 1),
       };
     case "both-up-mid":
       return {
-        [aId]: randomPct(0.15, 0.24, 1),
-        [bId]: randomPct(0.15, 0.24, 1),
+        [aId]: randomPct(0.06, 0.12, 1),
+        [bId]: randomPct(0.06, 0.12, 1),
       };
     case "a-strong-b-mild-up":
       return {
-        [aId]: randomPct(0.25, 0.34, 1),
-        [bId]: randomPct(0.1, 0.19, 1),
+        [aId]: randomPct(0.1, 0.18, 1),
+        [bId]: randomPct(0.05, 0.1, 1),
       };
     case "both-down-crash":
       return {
-        [aId]: randomPct(0.3, 0.4, -1),
-        [bId]: randomPct(0.3, 0.4, -1),
+        [aId]: randomPct(0.1, 0.2, -1),
+        [bId]: randomPct(0.1, 0.2, -1),
       };
     case "both-down-heavy":
       return {
-        [aId]: randomPct(0.26, 0.38, -1),
-        [bId]: randomPct(0.26, 0.38, -1),
+        [aId]: randomPct(0.08, 0.16, -1),
+        [bId]: randomPct(0.08, 0.16, -1),
       };
     case "both-up-jackpot":
       return {
-        [aId]: randomPct(1.0, 1.5, 1),
-        [bId]: randomPct(1.0, 1.5, 1),
+        [aId]: randomPct(0.45, 0.75, 1),
+        [bId]: randomPct(0.45, 0.75, 1),
       };
     default:
       return {
@@ -151,9 +151,10 @@ export const DEFAULT_SPECIAL_EVENT_CONFIG = {
   mediaNames: MEDIA_NAMES,
   comboTemplates: COMBO_TEMPLATES,
   rumorTemplates: SINGLE_RUMOR_TEMPLATES,
-  triggerChancePerCall: 0.2,
+  triggerChancePerCall: 0.07,
   comboChance: 0.68,
-  jackpotWaveChance: 0.28,
+  comboSuccessChance: 0.2, // 20% 떡상, 80% 떡락
+  comboCooldownCalls: 12,
   jackpotSingers: [
     "지디",
     "아이유",
@@ -166,13 +167,18 @@ export const DEFAULT_SPECIAL_EVENT_CONFIG = {
 export function createSpecialEventsGenerator(config = DEFAULT_SPECIAL_EVENT_CONFIG) {
   const state = {
     activeCombo: null,
+    callSeq: 0,
+    comboCooldownUntil: 0,
   };
 
   function resetDay() {
     state.activeCombo = null;
+    state.callSeq = 0;
+    state.comboCooldownUntil = 0;
   }
 
   function nextEvent({ stocks }) {
+    state.callSeq += 1;
     if (!Array.isArray(stocks) || stocks.length === 0) return null;
     if (Math.random() > (config.triggerChancePerCall ?? 0.2)) return null;
 
@@ -189,15 +195,33 @@ export function createSpecialEventsGenerator(config = DEFAULT_SPECIAL_EVENT_CONF
       } else {
         const nextStep = combo.template.steps[combo.stepIdx];
         if (nextStep) {
-          const headline = renderTemplate(nextStep.text, combo.vars);
-          const impacts = buildImpacts(nextStep.impactMode, combo.aId, combo.bId);
+          const isSecondStep = combo.stepIdx === 1;
+          let stepResolved = nextStep;
+          if (isSecondStep && combo.isSuccess === true) {
+            stepResolved = {
+              ...nextStep,
+              tone: "good",
+              text: "🔥 [특보] {CompanyA} x {CompanyB} 제품, 빌보드 스타 {Singer}가 착용하며 전 세계 품절 대란! 물 들어올 때 노 젓는다!",
+              impactMode: "both-up-jackpot",
+            };
+          }
+          const headline = renderTemplate(stepResolved.text, combo.vars);
+          const impacts = buildImpacts(
+            stepResolved.impactMode,
+            combo.aId,
+            combo.bId
+          );
           combo.stepIdx += 1;
-          if (combo.stepIdx >= combo.template.steps.length) state.activeCombo = null;
+          if (combo.stepIdx >= combo.template.steps.length) {
+            state.activeCombo = null;
+            state.comboCooldownUntil =
+              state.callSeq + Math.max(0, Number(config.comboCooldownCalls) || 0);
+          }
           return {
             headline,
             impacts,
             primaryStockId: combo.aId,
-            feedType: nextStep.feedType || "chain",
+            feedType: stepResolved.feedType || "chain",
             isRumor: false,
             bias: {
               [combo.aId]: impacts[combo.aId] >= 0 ? 0.01 : -0.01,
@@ -211,7 +235,8 @@ export function createSpecialEventsGenerator(config = DEFAULT_SPECIAL_EVENT_CONF
     }
 
     const wantCombo = Math.random() < (config.comboChance ?? 0.68);
-    if (wantCombo && idsWithPool.length >= 2) {
+    const comboAllowed = state.callSeq >= state.comboCooldownUntil;
+    if (wantCombo && comboAllowed && idsWithPool.length >= 2) {
       const shuffled = idsWithPool.slice().sort(() => Math.random() - 0.5);
       const aId = shuffled[0];
       const bId = shuffled[1];
@@ -227,21 +252,16 @@ export function createSpecialEventsGenerator(config = DEFAULT_SPECIAL_EVENT_CONF
         keywordB,
         singer: pick(config.jackpotSingers || ["월드스타"]),
       };
-      const templateSteps = template.steps.map((s) => ({ ...s }));
-      if (
-        templateSteps.length >= 2 &&
-        (templateSteps[1].impactMode || "").startsWith("both-down") &&
-        Math.random() < (config.jackpotWaveChance ?? 0.28)
-      ) {
-        templateSteps[1] = {
-          ...templateSteps[1],
-          tone: "good",
-          text: "🔥 [특보] {CompanyA} x {CompanyB} 제품, 빌보드 스타 {Singer}가 착용하며 전 세계 품절 대란! 물 들어올 때 노 젓는다!",
-          impactMode: "both-up-jackpot",
-        };
-      }
-      const templateResolved = { ...template, steps: templateSteps };
-      state.activeCombo = { aId, bId, vars, template: templateResolved, stepIdx: 1 };
+      const isSuccess = Math.random() < (config.comboSuccessChance ?? 0.2);
+      const templateResolved = { ...template, steps: template.steps.map((s) => ({ ...s })) };
+      state.activeCombo = {
+        aId,
+        bId,
+        vars,
+        template: templateResolved,
+        stepIdx: 1,
+        isSuccess,
+      };
       const first = templateResolved.steps[0];
       return {
         headline: renderTemplate(first.text, vars),
