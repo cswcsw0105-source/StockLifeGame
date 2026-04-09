@@ -150,8 +150,6 @@ const MARKET_CLOSE_MIN = 16 * 60 + 30;
 const GAME_MINUTES_PER_DAY = 24 * 60;
 /** 장 시작 전 대기(프리마켓) — 08:00~09:00, 시장가 불가 · 지정가 예약 가능 */
 const PREMARKET_START_MIN = 8 * 60;
-/** 하루 중 08:00~16:30 장 운영 구간 길이(분) — 야간 공백 제외 연속 타임라인 */
-const SESSION_TRADING_MINUTES = MARKET_CLOSE_MIN - PREMARKET_START_MIN;
 /** 08:00~08:50(게임분 480~529): 프리마켓 뉴스 폭격 구간 */
 const PREMARKET_NEWS_END_MIN = 8 * 60 + 50;
 /** 15:30~16:30 시간외 뉴스 스케줄(분) */
@@ -197,6 +195,8 @@ let playerProfile = {
   hasReceivedStartingFund: false,
   /** 전일 마감 기준 총자산(현금+평가) */
   previousDayTotalAssets: INITIAL_CAPITAL,
+  /** 당일 09:00 세션 시작 시점 순자산 — 일일 손익(입출금·대출 제외 목적) */
+  sessionOpenNetWorthPl: INITIAL_CAPITAL,
   /** 은행 예치금/대출금 */
   bankDeposit: 0,
   bankLoan: 0,
@@ -204,9 +204,6 @@ let playerProfile = {
   bankLoanRate: BANK_DAILY_LOAN_RATE,
   /** 가장 비싼 플렉스 소비 아이템 */
   flexTopItemId: "",
-  /** 당일 09:00 장 시작 직후 순자산(일일 손익 기준) */
-  dailyPlSessionStartEquity: null,
-  dailyPlSessionDayIndex: null,
 };
 
 let gameClockEverStarted = false;
@@ -973,9 +970,28 @@ function ensurePreviousDayAssetsBase() {
 }
 
 function snapshotPreviousDayTotalAssets() {
-  const nw = netWorth();
+  const nw = sessionOpenNetWorthValue();
   playerProfile.previousDayTotalAssets = Math.max(0, Math.floor(Number(nw) || 0));
   schedulePersistUser();
+}
+
+function sessionOpenNetWorthValue() {
+  const cash = Math.max(0, Math.floor(Number(game.cash) || 0));
+  const dep = bankDepositAmount();
+  const loan = bankLoanAmount();
+  const pv = portfolioValue();
+  return clampSafeInteger(cash + dep + pv - loan, 0);
+}
+
+function snapshotSessionOpenNetWorthForDailyPl() {
+  playerProfile.sessionOpenNetWorthPl = sessionOpenNetWorthValue();
+  schedulePersistUser();
+}
+
+function ensureSessionOpenNetWorthForDailyPl() {
+  const v = Number(playerProfile.sessionOpenNetWorthPl);
+  if (Number.isFinite(v) && v >= 0) return Math.max(0, Math.floor(v));
+  return sessionOpenNetWorthValue();
 }
 
 const REIT_MONTHLY_DIVIDEND_RATE = 0.03;
@@ -1402,6 +1418,9 @@ async function loadUserFromServer() {
   playerProfile.previousDayTotalAssets = Number.isFinite(Number(prof.previousDayTotalAssets))
     ? Math.max(0, Math.floor(Number(prof.previousDayTotalAssets)))
     : INITIAL_CAPITAL;
+  playerProfile.sessionOpenNetWorthPl = Number.isFinite(Number(prof.sessionOpenNetWorthPl))
+    ? Math.max(0, Math.floor(Number(prof.sessionOpenNetWorthPl)))
+    : sessionOpenNetWorthValue();
   playerProfile.bankDeposit = Math.max(0, Math.floor(Number(prof.bankDeposit) || 0));
   playerProfile.bankLoan = Math.max(0, Math.floor(Number(prof.bankLoan) || 0));
   playerProfile.bankDepositRate = Number(prof.bankDepositRate) > 0
@@ -1411,16 +1430,6 @@ async function loadUserFromServer() {
     ? Number(prof.bankLoanRate)
     : BANK_DAILY_LOAN_RATE;
   playerProfile.flexTopItemId = typeof prof.flexTopItemId === "string" ? prof.flexTopItemId : "";
-  playerProfile.dailyPlSessionStartEquity =
-    prof.dailyPlSessionStartEquity != null &&
-    Number.isFinite(Number(prof.dailyPlSessionStartEquity))
-      ? Math.floor(Number(prof.dailyPlSessionStartEquity))
-      : null;
-  playerProfile.dailyPlSessionDayIndex =
-    prof.dailyPlSessionDayIndex != null &&
-    Number.isFinite(Number(prof.dailyPlSessionDayIndex))
-      ? Math.floor(Number(prof.dailyPlSessionDayIndex))
-      : null;
   pendingOrders = Array.isArray(prof.pendingOrders)
     ? prof.pendingOrders.filter(
         (o) =>
@@ -2269,6 +2278,10 @@ async function persistUserNow() {
           0,
           Math.floor(Number(playerProfile.previousDayTotalAssets) || 0)
         ),
+        sessionOpenNetWorthPl: Math.max(
+          0,
+          Math.floor(Number(playerProfile.sessionOpenNetWorthPl) || 0)
+        ),
         bankDeposit: bankDepositAmount(),
         bankLoan: bankLoanAmount(),
         bankDepositRate: Number(playerProfile.bankDepositRate) || BANK_DAILY_DEPOSIT_RATE,
@@ -2278,16 +2291,6 @@ async function persistUserNow() {
         lastSalaryMonthKey: playerProfile.lastSalaryMonthKey || "",
         lastReitDivMonthKey: playerProfile.lastReitDivMonthKey || "",
         pendingOrders,
-        dailyPlSessionStartEquity:
-          playerProfile.dailyPlSessionStartEquity != null &&
-          Number.isFinite(Number(playerProfile.dailyPlSessionStartEquity))
-            ? Math.floor(Number(playerProfile.dailyPlSessionStartEquity))
-            : null,
-        dailyPlSessionDayIndex:
-          playerProfile.dailyPlSessionDayIndex != null &&
-          Number.isFinite(Number(playerProfile.dailyPlSessionDayIndex))
-            ? Math.floor(Number(playerProfile.dailyPlSessionDayIndex))
-            : null,
       },
       updated_at: new Date().toISOString(),
     })
@@ -2649,57 +2652,98 @@ function candleDateMs(dayIndex, periodStartMin) {
   return d.getTime();
 }
 
-/** 08:00~16:30 세션만 이어 붙인 단조 증가 X축(야간 공백 제거) */
-function candleRowTradingOrdinal(r) {
-  const nr = normalizeCandleRow(r);
-  const d = Math.floor(Number(nr.dayIndex) || 0);
-  let m = Math.floor(Number(nr.periodStartMin) || PREMARKET_START_MIN);
-  m = Math.max(
-    PREMARKET_START_MIN,
-    Math.min(MARKET_CLOSE_MIN - 1, m)
-  );
-  return d * SESSION_TRADING_MINUTES + (m - PREMARKET_START_MIN);
-}
-
-function detailChartRangeWindowOrdSpan(range) {
+function detailChartRangeWindowMs(range) {
+  const DAY_MS = 24 * 60 * 60 * 1000;
   switch (range) {
     case "d1":
-      return SESSION_TRADING_MINUTES;
+      return 1 * DAY_MS;
     case "w1":
-      return 5 * SESSION_TRADING_MINUTES;
+      return 7 * DAY_MS;
     case "m1":
-      return 22 * SESSION_TRADING_MINUTES;
+      return 30 * DAY_MS;
     default:
       return null;
   }
 }
 
-function formatDetailChartOrdinalLabel(ord) {
-  const o = Math.floor(Number(ord) || 0);
-  const d = Math.floor(o / SESSION_TRADING_MINUTES);
-  const off = o - d * SESSION_TRADING_MINUTES;
-  const pm = PREMARKET_START_MIN + off;
-  return formatCandleXLabel(d, pm);
+/** 정규장(09:00~15:30) 캔들만 연속 X — 야간·휴장 구간 생략 */
+function chartSessionOrdinalFromRow(r) {
+  const row = normalizeCandleRow(r);
+  const day = row.dayIndex;
+  const m = row.periodStartMin;
+  const clamped = Math.max(
+    MARKET_OPEN_MIN,
+    Math.min(MARKET_REGULAR_CLOSE_MIN - 1, m)
+  );
+  const offsetInDay = clamped - MARKET_OPEN_MIN;
+  return day * SESSION_GAME_MINUTES + offsetInDay;
+}
+
+function detailChartRangeWindowOrdinal(range) {
+  const DAY = SESSION_GAME_MINUTES;
+  switch (range) {
+    case "d1":
+      return DAY;
+    case "w1":
+      return 5 * DAY;
+    case "m1":
+      return 22 * DAY;
+    default:
+      return null;
+  }
+}
+
+function filterDetailChartRowsForRange(rows, range) {
+  if (!rows || rows.length === 0) return [];
+  const norm = rows.map((r) => normalizeCandleRow({ ...r }));
+  norm.sort(
+    (a, b) => chartSessionOrdinalFromRow(a) - chartSessionOrdinalFromRow(b)
+  );
+  if (range === "all") return norm;
+  if (range === "d1") {
+    let out = norm.filter((r) => r.dayIndex === gameDayIndex);
+    if (out.length === 0 && norm.length > 0) {
+      const lastDay = norm[norm.length - 1].dayIndex;
+      out = norm.filter((r) => r.dayIndex === lastDay);
+    }
+    return out;
+  }
+  if (range === "w1") {
+    const dMin = gameDayIndex - 4;
+    return norm.filter((r) => r.dayIndex >= dMin && r.dayIndex <= gameDayIndex);
+  }
+  if (range === "m1") {
+    const dMin = gameDayIndex - 21;
+    return norm.filter((r) => r.dayIndex >= dMin && r.dayIndex <= gameDayIndex);
+  }
+  return norm;
+}
+
+function formatChartOrdinalAxisLabel(ord) {
+  const day = Math.floor(ord / SESSION_GAME_MINUTES);
+  const off = ord - day * SESSION_GAME_MINUTES;
+  const periodStartMin = MARKET_OPEN_MIN + off;
+  return formatCandleXLabel(day, periodStartMin);
 }
 
 function filterCandleRowsForChartRange(rows, range) {
   if (!rows || rows.length === 0) return [];
   if (range === "all") return rows;
-  const winOrd = detailChartRangeWindowOrdSpan(range);
-  if (!Number.isFinite(winOrd) || winOrd <= 0) return rows;
+  const winMs = detailChartRangeWindowMs(range);
+  if (!Number.isFinite(winMs) || winMs <= 0) return rows;
 
   const normalized = rows
     .map((r) => normalizeCandleRow(r))
-    .filter((r) => Number.isFinite(candleRowTradingOrdinal(r)));
+    .filter((r) => Number.isFinite(Number(r?.x)));
   if (normalized.length === 0) return [];
 
-  const latestOrd = normalized.reduce(
-    (m, r) => Math.max(m, candleRowTradingOrdinal(r)),
+  const latestTs = normalized.reduce(
+    (m, r) => Math.max(m, Number(r.x)),
     -Infinity
   );
-  if (!Number.isFinite(latestOrd)) return [];
-  const threshold = latestOrd - winOrd;
-  return normalized.filter((r) => candleRowTradingOrdinal(r) >= threshold);
+  if (!Number.isFinite(latestTs)) return [];
+  const threshold = latestTs - winMs;
+  return normalized.filter((r) => Number(r.x) >= threshold);
 }
 
 function capDetailChartRows(rows, range) {
@@ -2836,9 +2880,7 @@ function buildPreparedDetailRows(stockId) {
   const aggregated = aggregateCandleRows(rows, aggFactorForDetailRange(range));
   const sampled = sampleRowsForDetailChart(aggregated);
   if (sampled.length > 0) {
-    return sampled.sort(
-      (a, b) => candleRowTradingOrdinal(a) - candleRowTradingOrdinal(b)
-    );
+    return sampled.sort((a, b) => Number(a.x) - Number(b.x));
   }
   if (delistedStocks[stockId]) {
     const x = candleDateMs(gameDayIndex, gameMinutes);
@@ -2854,9 +2896,7 @@ function buildPreparedDetailRows(stockId) {
         c: 0,
         v: 1,
       }),
-    ].sort(
-      (a, b) => candleRowTradingOrdinal(a) - candleRowTradingOrdinal(b)
-    );
+    ].sort((a, b) => Number(a.x) - Number(b.x));
   }
   return sampled;
 }
@@ -2873,7 +2913,7 @@ function buildFullCanvasRowsForScrollChart(stockId) {
   } catch {
     arr = raw.map((r) => ({ ...r }));
   }
-  return arr.sort((a, b) => candleRowTradingOrdinal(a) - candleRowTradingOrdinal(b));
+  return arr.sort((a, b) => Number(a.x) - Number(b.x));
 }
 
 function getAvgCostForStock(stockId) {
@@ -3331,7 +3371,7 @@ function applyOpeningGapFromPremarket() {
   });
 
   snapshotSessionOpen();
-  snapshotDailyPlSessionOpen();
+  snapshotSessionOpenNetWorthForDailyPl();
 
   addNewsItem(
     `09:00 시초가 갭 반영 — Net Impact 요약: ${summaryBits.join(" · ")}`,
@@ -3577,31 +3617,7 @@ function portfolioValue() {
 }
 
 function netWorth() {
-  return (
-    Math.floor(Number(game.cash) || 0) +
-    bankDepositAmount() +
-    portfolioValue() -
-    bankLoanAmount()
-  );
-}
-
-function investableNetEquity() {
-  return netWorth();
-}
-
-/** 09:00 시초가·갭 반영 직후 당일 일손익 기준선 */
-function snapshotDailyPlSessionOpen() {
-  const d = gameDayIndex;
-  if (
-    Number(playerProfile.dailyPlSessionDayIndex) === d &&
-    playerProfile.dailyPlSessionStartEquity != null &&
-    Number.isFinite(Number(playerProfile.dailyPlSessionStartEquity))
-  ) {
-    return;
-  }
-  playerProfile.dailyPlSessionStartEquity = investableNetEquity();
-  playerProfile.dailyPlSessionDayIndex = d;
-  schedulePersistUser();
+  return sessionOpenNetWorthValue();
 }
 
 function bankDepositAmount() {
@@ -5006,7 +5022,14 @@ function renderScrollDetailCharts(stockId, opts = {}) {
     scrollRatio = maxScroll > 0 ? wrapMain.scrollLeft / maxScroll : 1;
   }
 
-  const rows = buildFullCanvasRowsForScrollChart(stockId);
+  const chartRangeKey = detailChartRange || "all";
+  const fullRaw = buildFullCanvasRowsForScrollChart(stockId);
+  let rows = filterDetailChartRowsForRange(fullRaw, chartRangeKey);
+  rows = rows.map((r) => {
+    const base = normalizeCandleRow({ ...r });
+    return { ...base, ord: chartSessionOrdinalFromRow(base) };
+  });
+  rows.sort((a, b) => a.ord - b.ord);
   const viewportW = Math.max(1, wrapMain.clientWidth || 1);
 
   if (!rows.length) {
@@ -5023,16 +5046,13 @@ function renderScrollDetailCharts(stockId, opts = {}) {
     return;
   }
 
-  function rowOrd(r) {
-    return candleRowTradingOrdinal(r);
-  }
-  const ordMin = rowOrd(rows[0]);
-  const ordMax = rowOrd(rows[rows.length - 1]);
-  const spanOrd = Math.max(1, ordMax - ordMin);
-  const range = detailChartRange || "all";
+  const tMinOrd = rows[0].ord;
+  const tMaxOrd = rows[rows.length - 1].ord;
+  const spanOrd = Math.max(1, tMaxOrd - tMinOrd);
+  const range = chartRangeKey;
   let winOrd = spanOrd;
   if (range !== "all") {
-    const w = detailChartRangeWindowOrdSpan(range);
+    const w = detailChartRangeWindowOrdinal(range);
     if (Number.isFinite(w) && w > 0) winOrd = Math.min(w, spanOrd);
   }
   const contentWidth =
@@ -5040,12 +5060,14 @@ function renderScrollDetailCharts(stockId, opts = {}) {
       ? viewportW
       : Math.max(viewportW, Math.ceil(viewportW * (spanOrd / Math.max(winOrd, 1))));
 
-  const viewStartOrd = Math.max(ordMin, ordMin + scrollRatio * (spanOrd - winOrd));
-  const viewEndOrd = Math.min(ordMax, viewStartOrd + winOrd);
-  const viewRows = rows.filter((r) => {
-    const o = rowOrd(r);
-    return o >= viewStartOrd && o <= viewEndOrd;
-  });
+  const viewStartOrd = Math.max(
+    tMinOrd,
+    tMinOrd + scrollRatio * (spanOrd - winOrd)
+  );
+  const viewEndOrd = Math.min(tMaxOrd, viewStartOrd + winOrd);
+  const viewRows = rows.filter(
+    (r) => r.ord >= viewStartOrd && r.ord <= viewEndOrd
+  );
   const yRows = viewRows.length ? viewRows : rows;
   const avgCost = getAvgCostForStock(stockId);
   let yb = computeYBoundsForSvgRows(yRows, stockId, avgCost);
@@ -5060,8 +5082,8 @@ function renderScrollDetailCharts(stockId, opts = {}) {
   const plotW = plotRight - plotLeft;
   const plotH = plotBottom - plotTop;
 
-  function xAtOrd(o) {
-    return plotLeft + ((Number(o) - ordMin) / spanOrd) * plotW;
+  function xAt(ord) {
+    return plotLeft + ((Number(ord) - tMinOrd) / spanOrd) * plotW;
   }
   function yPrice(price) {
     const yMin = yb.min;
@@ -5092,7 +5114,7 @@ function renderScrollDetailCharts(stockId, opts = {}) {
       .map((r) => {
         const c = Number(r.c);
         if (!Number.isFinite(c) || c <= 0) return null;
-        return `${xAtOrd(rowOrd(r))},${yPrice(c)}`;
+        return `${xAt(r.ord)},${yPrice(c)}`;
       })
       .filter(Boolean);
     const lineColor =
@@ -5115,7 +5137,7 @@ function renderScrollDetailCharts(stockId, opts = {}) {
       const h = Number(r.h);
       const l = Number(r.l);
       const c = Number(r.c);
-      const cx = xAtOrd(rowOrd(r));
+      const cx = xAt(r.ord);
       const up = c >= o;
       const col = up ? CANDLE_UP : CANDLE_DOWN;
       clipInner.push(
@@ -5174,9 +5196,9 @@ function renderScrollDetailCharts(stockId, opts = {}) {
   }
 
   for (let k = 0; k <= 4; k += 1) {
-    const o = ordMin + (spanOrd * k) / 4;
-    const lx = xAtOrd(o);
-    const lab = formatDetailChartOrdinalLabel(o);
+    const ordK = tMinOrd + (spanOrd * k) / 4;
+    const lx = xAt(ordK);
+    const lab = formatChartOrdinalAxisLabel(ordK);
     mainParts.push(
       `<text x="${lx}" y="${DETAIL_SVG_MAIN_H - 6}" fill="#8b95a8" font-size="9">${escapeHtml(lab)}</text>`
     );
@@ -5195,7 +5217,7 @@ function renderScrollDetailCharts(stockId, opts = {}) {
   rows.forEach((r) => {
     const v = Number(r.v) || 0;
     const h = Math.max(2, (v / vmax) * volPlotH);
-    const cx = xAtOrd(rowOrd(r));
+    const cx = xAt(r.ord);
     const bw = candleW;
     const up = Number(r.c) >= Number(r.o);
     const col = up ? CANDLE_UP : CANDLE_DOWN;
@@ -6295,18 +6317,12 @@ function refreshPortfolioTableCells() {
 
 function renderAssetSummary() {
   const nw = netWorth();
-  const eq = investableNetEquity();
-  const d = gameDayIndex;
-  const sd = Number(playerProfile.dailyPlSessionDayIndex);
-  const se = Number(playerProfile.dailyPlSessionStartEquity);
-  const hasDayBase =
-    Number.isFinite(sd) && sd === d && Number.isFinite(se);
-  const dayPl = hasDayBase ? eq - se : 0;
-  const dayPlDen = hasDayBase ? Math.max(1, Math.abs(se)) : 1;
-  const dayPlPct = hasDayBase ? (dayPl / dayPlDen) * 100 : 0;
-  const cumBase = Math.max(1, Math.floor(Number(game.initialCapital) || INITIAL_CAPITAL));
-  const totalPl = eq - cumBase;
-  const totalPlPct = (totalPl / cumBase) * 100;
+  const dayOpenBase = ensureSessionOpenNetWorthForDailyPl();
+  const dayPl = nw - dayOpenBase;
+  const dayPlPct = dayOpenBase > 0 ? (dayPl / dayOpenBase) * 100 : 0;
+  const cumBase = Math.max(0, Math.floor(Number(game.initialCapital) || INITIAL_CAPITAL));
+  const totalPl = nw - cumBase;
+  const totalPlPct = cumBase > 0 ? (totalPl / cumBase) * 100 : 0;
 
   const totalEl = document.getElementById("summaryTotalProfit");
   const totalPctEl = document.getElementById("summaryTotalProfitPct");
@@ -6961,13 +6977,12 @@ async function runSeason2HardReset() {
   game.initialCapital = 1_000_000;
   playerProfile.hasReceivedStartingFund = true;
   playerProfile.previousDayTotalAssets = 1_000_000;
+  playerProfile.sessionOpenNetWorthPl = 1_000_000;
   playerProfile.bankDeposit = 0;
   playerProfile.bankLoan = 0;
   playerProfile.bankDepositRate = BANK_DAILY_DEPOSIT_RATE;
   playerProfile.bankLoanRate = BANK_DAILY_LOAN_RATE;
   playerProfile.flexTopItemId = "";
-  playerProfile.dailyPlSessionStartEquity = null;
-  playerProfile.dailyPlSessionDayIndex = null;
   if (loginDisplayName) writeStartingFundGuard(loginDisplayName);
   game.holdings = {};
   game.costBasis = {};
@@ -7002,6 +7017,7 @@ async function runSeason2HardReset() {
   resetNewsSpikeState();
   resetDailyNewsState();
   clearCandleHistory();
+  snapshotSessionOpen();
   renderPendingOrdersUi();
 
   const msg =
@@ -7019,15 +7035,10 @@ async function runSeason2HardReset() {
       });
       game.cash = 1_000_000;
       game.initialCapital = 1_000_000;
-      playerProfile.dailyPlSessionStartEquity = null;
-      playerProfile.dailyPlSessionDayIndex = null;
     } catch (e) {
       console.warn("runSeason2HardReset rpc", e);
     }
   }
-
-  snapshotSessionOpen();
-  snapshotDailyPlSessionOpen();
 
   renderDateTimeLine();
   renderCalendarUI();
@@ -7068,6 +7079,7 @@ function initNewGame() {
   game.initialCapital = INITIAL_CAPITAL;
   game.tradeBlockedUntilMs = 0;
   playerProfile.previousDayTotalAssets = INITIAL_CAPITAL;
+  playerProfile.sessionOpenNetWorthPl = INITIAL_CAPITAL;
   playerProfile.bankDeposit = 0;
   playerProfile.bankLoan = 0;
   playerProfile.bankDepositRate = BANK_DAILY_DEPOSIT_RATE;
@@ -7075,8 +7087,6 @@ function initNewGame() {
   playerProfile.flexTopItemId = "";
   playerProfile.lastSalaryMonthKey =
     getMonthContextForDayIndex(gameDayIndex).monthKey;
-  playerProfile.dailyPlSessionStartEquity = null;
-  playerProfile.dailyPlSessionDayIndex = null;
 
   stocks.forEach((s) => {
     s.price = randomInitialPrice();
@@ -7104,7 +7114,7 @@ function initNewGame() {
   warmupPrices();
   syncEtfPriceFromMarket();
   snapshotSessionOpen();
-  snapshotDailyPlSessionOpen();
+  snapshotSessionOpenNetWorthForDailyPl();
 }
 
 async function runGameBootstrap() {
