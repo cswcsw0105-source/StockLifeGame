@@ -326,6 +326,24 @@
                 <p class="detail-orderbook-hint">호가는 시뮬레이션 · 체결강도는 현재가 방향 기준 랜덤</p>
                 <div class="orderbook-rows" id="detailOrderBookRows"></div>
               </div>
+              <section class="detail-stock-community" id="detailStockCommunity" aria-label="종목 토론방">
+                <h3 class="detail-stock-community__title">종목 토론방</h3>
+                <ul id="detailCommunityList" class="detail-stock-community__list"></ul>
+                <div class="detail-stock-community__composer">
+                  <label class="visually-hidden" for="detailCommunityInput">댓글 입력</label>
+                  <input
+                    type="text"
+                    id="detailCommunityInput"
+                    class="detail-stock-community__input"
+                    maxlength="280"
+                    placeholder="의견을 남겨 보세요…"
+                    autocomplete="off"
+                  />
+                  <button type="button" id="detailCommunitySend" class="btn-mts primary detail-stock-community__send">
+                    등록
+                  </button>
+                </div>
+              </section>
               <section class="detail-stock-news" aria-label="종목 속보">
                 <h3 class="detail-stock-news__title">이 종목 속보</h3>
                 <ul id="detailStockNewsList" class="detail-stock-news__list"></ul>
