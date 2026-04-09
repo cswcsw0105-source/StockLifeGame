@@ -583,6 +583,8 @@ body {
   flex-direction: column;
   gap: 2px;
   width: 100%;
+  overflow: hidden;
+  clip-path: inset(0 0 0 0);
 }
 
 .detail-chart-scroll-strip {
@@ -590,6 +592,8 @@ body {
   width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
+  clip-path: inset(0 0 0 0);
+  white-space: nowrap;
   scroll-behavior: smooth;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
@@ -608,9 +612,12 @@ body {
 
 .detail-chart-scroll-inner {
   position: relative;
+  display: inline-block;
+  vertical-align: top;
   height: 210px;
   min-height: 210px;
   overflow: hidden;
+  clip-path: inset(0 0 0 0);
 }
 
 .detail-chart-scroll-inner--vol {
@@ -621,8 +628,10 @@ body {
 .detail-chart-svg {
   display: block;
   height: 100%;
-  width: 100%;
-  min-width: 100%;
+  width: auto;
+  min-width: 0;
+  overflow: hidden;
+  clip-path: inset(0 0 0 0);
 }
 
 .detail-chart-svg--main {
