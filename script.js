@@ -1,5 +1,5 @@
 /**
- * Stock Life — ApexCharts 캔들+거래량, 1초=장내 1분, 10분봉(현실 10초), 뉴스 체이닝
+ * Stock Life — SVG 스크롤 캔들+거래량, 1초=장내 1분, 10분봉(현실 10초), 뉴스 체이닝
  * 다음 거래일 08:00~09:00 프리마켓(매매 불가) → 09:00 Net Impact 시초가 갭
  * 온라인: Supabase `market_state`(클라이언트 주도 10초 틱 + Realtime) + RPC 매매
  */
@@ -779,23 +779,20 @@ const candleHistory = Object.fromEntries(
   STOCK_SPECS.map((s) => [s.id, []])
 );
 
-/** 상세 화면 캔들/거래량 차트만 사용 */
-const apexDetail = {
-  candle: null,
-  vol: null,
+/** 상세 화면 캔들/거래량 — SVG 스크롤 뷰포트 엔진 */
+const detailChartView = {
   stockId: null,
   chartRange: "all",
   chartType: "candle",
 };
 
 let selectedStockId = null;
-/** 상세 차트 기간: all | d1(당일) | d5 | w1 | m1 */
+/** 상세 차트 기간: all | d1(당일) | w1 | m1 */
 let detailChartRange = "all";
 
 /** 상세 차트 렌더 방어: 범위별 최대 포인트 수 */
 const DETAIL_CHART_MAX_POINTS = {
   d1: 420, // 당일(10분봉) + 장중 진행 봉 여유
-  d5: 900,
   w1: 1200,
   m1: 1600,
   all: 1800,
@@ -803,11 +800,17 @@ const DETAIL_CHART_MAX_POINTS = {
 const DETAIL_CHART_SAMPLE_MAX_POINTS = 120;
 const DETAIL_CHART_BUCKET_MINUTES_BY_RANGE = {
   d1: 10, // 10분봉(원본)
-  d5: 30,
   w1: 60,
   m1: 240,
   all: 480,
 };
+
+const DETAIL_SVG_MAIN_H = 210;
+const DETAIL_SVG_VOL_H = 88;
+const DETAIL_SVG_PAD_L = 8;
+const DETAIL_SVG_PAD_R = 8;
+const DETAIL_SVG_PAD_T = 8;
+const DETAIL_SVG_PAD_B = 26;
 
 /** 상세 차트: candle | line */
 let detailChartType = "candle";
@@ -2123,7 +2126,7 @@ function subscribeMarketRealtime() {
     });
 }
 
-/** display:none 해제 직후 Apex·목록 레이아웃이 0이었을 때 보정 */
+/** display:none 해제 직후 목록·상세 차트 레이아웃이 0이었을 때 보정 */
 function reflowGameScreenUi() {
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
@@ -2131,12 +2134,6 @@ function reflowGameScreenUi() {
         renderDateTimeLine();
         renderCalendarUI();
         renderStockListMain();
-        if (apexDetail.candle && typeof apexDetail.candle.resize === "function") {
-          apexDetail.candle.resize();
-        }
-        if (apexDetail.vol && typeof apexDetail.vol.resize === "function") {
-          apexDetail.vol.resize();
-        }
         refreshDetailChart();
         updateDetailPriceLine();
         updatePremarketChartOverlay();
@@ -2544,8 +2541,6 @@ function detailChartRangeWindowMs(range) {
   switch (range) {
     case "d1":
       return 1 * DAY_MS;
-    case "d5":
-      return 5 * DAY_MS;
     case "w1":
       return 7 * DAY_MS;
     case "m1":
@@ -2708,7 +2703,9 @@ function buildPreparedDetailRows(stockId) {
   }
   const aggregated = aggregateCandleRows(rows, aggFactorForDetailRange(range));
   const sampled = sampleRowsForDetailChart(aggregated);
-  if (sampled.length > 0) return sampled;
+  if (sampled.length > 0) {
+    return sampled.sort((a, b) => Number(a.x) - Number(b.x));
+  }
   if (delistedStocks[stockId]) {
     const x = candleDateMs(gameDayIndex, gameMinutes);
     return [
@@ -2723,9 +2720,24 @@ function buildPreparedDetailRows(stockId) {
         c: 0,
         v: 1,
       }),
-    ];
+    ].sort((a, b) => Number(a.x) - Number(b.x));
   }
   return sampled;
+}
+
+/** 전체 캔들 캔버스용: 기간 필터 없이(all) 준비 후 깊은 복사 + 시간 오름차순 정렬 */
+function buildFullCanvasRowsForScrollChart(stockId) {
+  const prev = detailChartRange;
+  detailChartRange = "all";
+  const raw = buildPreparedDetailRows(stockId);
+  detailChartRange = prev;
+  let arr;
+  try {
+    arr = JSON.parse(JSON.stringify(raw));
+  } catch {
+    arr = raw.map((r) => ({ ...r }));
+  }
+  return arr.sort((a, b) => Number(a.x) - Number(b.x));
 }
 
 function getAvgCostForStock(stockId) {
@@ -2800,10 +2812,10 @@ function bindDetailChartRangeUiOnce() {
     const r = btn.getAttribute("data-chart-range");
     if (!r) return;
     detailChartRange = r;
-    apexDetail.chartRange = r;
+    detailChartView.chartRange = r;
     syncDetailChartRangeButtons();
-    if (selectedStockId && apexDetail.candle) {
-      refreshDetailChart();
+    if (selectedStockId) {
+      initDetailCharts(selectedStockId);
     }
   });
 }
@@ -4382,33 +4394,6 @@ function applyNewsPayload(ev) {
   scheduleNewsSpikeFromImpacts(ev.impacts || {});
 }
 
-function apexCommonChartOpts(height, chartType) {
-  return {
-    chart: {
-      type: chartType,
-      height,
-      toolbar: { show: false },
-      zoom: { enabled: false },
-      animations: { enabled: false },
-      background: "transparent",
-      fontFamily:
-        'Pretendard, "Apple SD Gothic Neo", -apple-system, sans-serif',
-    },
-    theme: { mode: "dark" },
-    grid: {
-      borderColor: "rgba(37, 42, 53, 0.9)",
-      strokeDashArray: 3,
-      padding: { left: 4, right: 8, top: 4, bottom: 0 },
-    },
-    dataLabels: { enabled: false },
-    tooltip: { enabled: false },
-    states: {
-      hover: { filter: { type: "none" } },
-      active: { filter: { type: "none" } },
-    },
-  };
-}
-
 /** 진행 중 봉의 추정 거래량(차트 막대) */
 function estimatePartialBarVolume(stockId) {
   const b = candleOhlcBuffer[stockId];
@@ -4497,35 +4482,84 @@ function computeDetailChartYBounds(stockId) {
   if (detailChartType === "line") {
     const pts = buildLineSeriesData(stockId);
     pts.forEach((p) => {
-      min = Math.min(min, p.y);
-      max = Math.max(max, p.y);
+      const y = Number(p.y);
+      if (y > 0) {
+        min = Math.min(min, y);
+        max = Math.max(max, y);
+      }
     });
   } else {
     const pts = buildCandleSeriesData(stockId);
     pts.forEach((p) => {
-      const [o, h, l, c] = p.y;
-      min = Math.min(min, o, h, l, c);
-      max = Math.max(max, o, h, l, c);
+      const [o, h, l, c] = p.y.map(Number);
+      const vals = [o, h, l, c].filter((v) => v > 0);
+      if (vals.length) {
+        min = Math.min(min, ...vals);
+        max = Math.max(max, ...vals);
+      }
     });
   }
-  if (avg != null) {
+  if (avg != null && avg > 0) {
     min = Math.min(min, avg);
     max = Math.max(max, avg);
   }
-  if (!Number.isFinite(min) || !Number.isFinite(max)) return {};
+  const st = getStockById(stockId);
+  const spot = Math.max(0, Math.floor(Number(st?.price) || 0));
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    const fb = Math.max(1, spot || 100);
+    return { min: 0, max: Math.ceil(fb * 1.08) };
+  }
   if (min === max) {
     const pad = Math.max(1, Math.floor(min * 0.004) || 1);
-    return { min: min - pad, max: max + pad };
+    return { min: Math.max(0, min - pad), max: max + pad };
   }
   const span = max - min;
   const pad = Math.max(span * 0.06, 1);
   return {
-    min: Math.floor(min - pad),
+    min: Math.max(0, Math.floor(min - pad)),
     max: Math.ceil(max + pad),
   };
 }
 
-/** 상세 차트 X축 — 고정 옵션(Apex category + tickAmount 조합 오류 방지) */
+function computeYBoundsForSvgRows(viewRows, stockId, avgCost) {
+  const prices = [];
+  if (detailChartType === "line") {
+    viewRows.forEach((r) => {
+      const c = Number(r.c);
+      if (Number.isFinite(c) && c > 0) prices.push(c);
+    });
+  } else {
+    viewRows.forEach((r) => {
+      const o = Number(r.o);
+      const h = Number(r.h);
+      const l = Number(r.l);
+      const c = Number(r.c);
+      [o, h, l, c].forEach((v) => {
+        if (Number.isFinite(v) && v > 0) prices.push(v);
+      });
+    });
+  }
+  if (avgCost != null && avgCost > 0) prices.push(avgCost);
+  if (prices.length === 0) {
+    const px = Math.max(0, Math.floor(Number(getStockById(stockId)?.price) || 0));
+    const fb = Math.max(1, px || 100);
+    return { min: 0, max: Math.ceil(fb * 1.08) };
+  }
+  let min = Math.min(...prices);
+  let max = Math.max(...prices);
+  if (min === max) {
+    const pad = Math.max(1, Math.floor(min * 0.004) || 1);
+    return { min: Math.max(0, min - pad), max: max + pad };
+  }
+  const span = max - min;
+  const pad = Math.max(span * 0.06, 1);
+  return {
+    min: Math.max(0, Math.floor(min - pad)),
+    max: Math.ceil(max + pad),
+  };
+}
+
+/** 상세 차트 X축 라벨 */
 function detailChartDatetimeFormatter(value) {
   const ms = Number(value);
   if (!Number.isFinite(ms)) return "";
@@ -4535,59 +4569,6 @@ function detailChartDatetimeFormatter(value) {
   const hh = String(d.getHours()).padStart(2, "0");
   const mi = String(d.getMinutes()).padStart(2, "0");
   return `${mm}/${dd} ${hh}:${mi}`;
-}
-
-function detailChartXaxisConfig(categories) {
-  return {
-    type: "category",
-    categories: Array.isArray(categories) ? categories : [],
-    tickAmount: 6,
-    tickPlacement: "on",
-    labels: {
-      rotate: -45,
-      hideOverlappingLabels: true,
-      style: { colors: "#8b95a8", fontSize: "8px" },
-      maxHeight: 80,
-    },
-    axisBorder: { show: false },
-    axisTicks: { show: false },
-  };
-}
-
-/** tickAmount 제외 — 렌더 실패 시 재시도용 */
-function detailChartXaxisConfigFallback(categories) {
-  return {
-    type: "category",
-    categories: Array.isArray(categories) ? categories : [],
-    tickPlacement: "on",
-    labels: {
-      rotate: -45,
-      hideOverlappingLabels: true,
-      style: { colors: "#8b95a8", fontSize: "8px" },
-      maxHeight: 80,
-    },
-    axisBorder: { show: false },
-    axisTicks: { show: false },
-  };
-}
-
-function detailChartYaxisConfig(yb) {
-  const base = {
-    labels: {
-      style: { colors: "#8b95a8", fontSize: "10px" },
-      formatter: (v) => Math.floor(v).toLocaleString("ko-KR"),
-    },
-  };
-  if (
-    yb &&
-    typeof yb.min === "number" &&
-    typeof yb.max === "number" &&
-    Number.isFinite(yb.min) &&
-    Number.isFinite(yb.max)
-  ) {
-    return { ...base, min: yb.min, max: yb.max, forceNiceScale: false };
-  }
-  return base;
 }
 
 function syncDetailChartTypeButtons() {
@@ -4610,7 +4591,7 @@ function bindDetailChartTypeToggleOnce() {
     if (t !== "candle" && t !== "line") return;
     if (t === detailChartType) return;
     detailChartType = t;
-    apexDetail.chartType = t;
+    detailChartView.chartType = t;
     syncDetailChartTypeButtons();
     if (selectedStockId) {
       initDetailCharts(selectedStockId);
@@ -4619,242 +4600,329 @@ function bindDetailChartTypeToggleOnce() {
 }
 
 function destroyDetailCharts() {
-  if (apexDetail.candle) {
-    apexDetail.candle.destroy();
-    apexDetail.candle = null;
-  }
-  if (apexDetail.vol) {
-    apexDetail.vol.destroy();
-    apexDetail.vol = null;
-  }
-  apexDetail.stockId = null;
+  const svgMain = document.getElementById("detailChartSvgMain");
+  const svgVol = document.getElementById("detailChartSvgVol");
+  if (svgMain) svgMain.innerHTML = "";
+  if (svgVol) svgVol.innerHTML = "";
 }
 
-/** 주가·거래량 차트 옵션 (xaxis 객체를 주입) */
-function buildDetailChartMainAndVolOpts(stockId, xa) {
-  const { candleSeriesData } = getDetailChartCategoriesAndCandleSeries(stockId);
-  const volPts = buildVolumeSeriesData(stockId);
-  const volData = volPts.map((p) => ({
-    x: detailChartDatetimeFormatter(p.x),
-    y: p.y,
-    fillColor: p.fillColor,
-  }));
-  const yb = computeDetailChartYBounds(stockId);
-  const ann = buildDetailChartAnnotations(stockId);
+function bindDetailChartScrollSyncOnce() {
+  const wrapMain = document.getElementById("detailChartScrollMain");
+  const wrapVol = document.getElementById("detailChartScrollVol");
+  if (!wrapMain || !wrapVol || wrapMain.dataset.scrollSyncBound === "1") return;
+  wrapMain.dataset.scrollSyncBound = "1";
+  wrapMain.addEventListener(
+    "scroll",
+    () => {
+      wrapVol.scrollLeft = wrapMain.scrollLeft;
+    },
+    { passive: true }
+  );
+}
 
-  let mainOpts;
-  if (detailChartType === "line") {
-    const linePts = buildLineSeriesData(stockId);
-    const lineColor = detailLineStrokeColor(stockId);
-    const lineData = linePts.map((p) => ({
-      x: p.x,
-      y: p.y,
-    }));
-    const lineBase = apexCommonChartOpts(210, "line");
-    mainOpts = {
-      ...lineBase,
-      chart: {
-        ...lineBase.chart,
-        animations: {
-          enabled: true,
-          easing: "easeinout",
-          speed: 420,
-          dynamicAnimation: { enabled: true, speed: 260 },
-        },
-      },
-      colors: [lineColor],
-      series: [{ name: stockId, data: lineData }],
-      stroke: {
-        width: 2.5,
-        curve: "smooth",
-        colors: [lineColor],
-      },
-      markers: {
-        size: 0,
-        hover: { size: 4 },
-      },
-      tooltip: { enabled: false },
-      annotations: ann,
-      xaxis: xa,
-      yaxis: detailChartYaxisConfig(yb),
-    };
-  } else {
-    const candleBase = apexCommonChartOpts(210, "candlestick");
-    mainOpts = {
-      ...candleBase,
-      chart: {
-        ...candleBase.chart,
-        animations: {
-          enabled: true,
-          easing: "easeinout",
-          speed: 420,
-          dynamicAnimation: { enabled: true, speed: 260 },
-        },
-      },
-      tooltip: { enabled: false },
-      series: [{ name: stockId, data: candleSeriesData }],
-      stroke: {
-        width: [1.15],
-        lineCap: "round",
-        lineJoin: "round",
-      },
-      plotOptions: {
-        candlestick: {
-          colors: {
-            upward: CANDLE_UP,
-            downward: CANDLE_DOWN,
-          },
-        },
-      },
-      annotations: ann,
-      xaxis: xa,
-      yaxis: detailChartYaxisConfig(yb),
+function bindDetailChartDragPanOnce() {
+  const wrapMain = document.getElementById("detailChartScrollMain");
+  const wrapVol = document.getElementById("detailChartScrollVol");
+  if (!wrapMain || wrapMain.dataset.dragPanBound === "1") return;
+  wrapMain.dataset.dragPanBound = "1";
+
+  let dragging = false;
+  let startX = 0;
+  let startScroll = 0;
+
+  const setGrab = (on) => {
+    wrapMain.classList.toggle("is-dragging", on);
+  };
+
+  const moveBoth = (nextLeft) => {
+    const maxScroll = Math.max(0, wrapMain.scrollWidth - wrapMain.clientWidth);
+    const sl = Math.max(0, Math.min(nextLeft, maxScroll));
+    wrapMain.scrollLeft = sl;
+    wrapVol.scrollLeft = sl;
+  };
+
+  wrapMain.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    dragging = true;
+    startX = e.clientX;
+    startScroll = wrapMain.scrollLeft;
+    setGrab(true);
+    e.preventDefault();
+  });
+
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - startX;
+    moveBoth(startScroll - dx);
+  });
+
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    setGrab(false);
+  });
+
+  wrapMain.addEventListener(
+    "touchstart",
+    (e) => {
+      if (e.touches.length !== 1) return;
+      dragging = true;
+      startX = e.touches[0].clientX;
+      startScroll = wrapMain.scrollLeft;
+      setGrab(true);
+    },
+    { passive: true }
+  );
+
+  window.addEventListener(
+    "touchmove",
+    (e) => {
+      if (!dragging || e.touches.length !== 1) return;
+      const dx = e.touches[0].clientX - startX;
+      moveBoth(startScroll - dx);
+    },
+    { passive: true }
+  );
+
+  window.addEventListener("touchend", () => {
+    if (!dragging) return;
+    dragging = false;
+    setGrab(false);
+  });
+}
+
+/**
+ * 전체 시계열을 긴 SVG에 그린 뒤, 가로 스크롤로 뷰포트만 이동 (MTS 스와이프)
+ */
+function renderScrollDetailCharts(stockId, opts = {}) {
+  const preserveScroll = opts.preserveScroll === true;
+  const wrapMain = document.getElementById("detailChartScrollMain");
+  const wrapVol = document.getElementById("detailChartScrollVol");
+  const innerMain = document.getElementById("detailChartInnerMain");
+  const innerVol = document.getElementById("detailChartInnerVol");
+  const svgMain = document.getElementById("detailChartSvgMain");
+  const svgVol = document.getElementById("detailChartSvgVol");
+  if (!wrapMain || !wrapVol || !innerMain || !innerVol || !svgMain || !svgVol) return;
+
+  detailChartView.stockId = stockId;
+  detailChartView.chartRange = detailChartRange;
+  detailChartView.chartType = detailChartType;
+
+  let scrollRatio = 1;
+  if (preserveScroll && wrapMain.scrollWidth > wrapMain.clientWidth) {
+    const maxScroll = wrapMain.scrollWidth - wrapMain.clientWidth;
+    scrollRatio = maxScroll > 0 ? wrapMain.scrollLeft / maxScroll : 1;
+  }
+
+  const rows = buildFullCanvasRowsForScrollChart(stockId);
+  const viewportW = Math.max(1, wrapMain.clientWidth || 1);
+
+  if (!rows.length) {
+    innerMain.style.width = `${viewportW}px`;
+    innerVol.style.width = `${viewportW}px`;
+    innerMain.style.minWidth = `${viewportW}px`;
+    innerVol.style.minWidth = `${viewportW}px`;
+    svgMain.setAttribute("viewBox", `0 0 ${viewportW} ${DETAIL_SVG_MAIN_H}`);
+    svgMain.setAttribute("width", viewportW);
+    svgVol.setAttribute("viewBox", `0 0 ${viewportW} ${DETAIL_SVG_VOL_H}`);
+    svgVol.setAttribute("width", viewportW);
+    svgMain.innerHTML = "";
+    svgVol.innerHTML = "";
+    return;
+  }
+
+  const tMin = Number(rows[0].x);
+  const tMax = Number(rows[rows.length - 1].x);
+  const spanMs = Math.max(1, tMax - tMin);
+  const range = detailChartRange || "all";
+  let winMs = spanMs;
+  if (range !== "all") {
+    const w = detailChartRangeWindowMs(range);
+    if (Number.isFinite(w) && w > 0) winMs = Math.min(w, spanMs);
+  }
+  const contentWidth =
+    range === "all"
+      ? viewportW
+      : Math.max(viewportW, Math.ceil(viewportW * (spanMs / Math.max(winMs, 1))));
+
+  const viewStart = Math.max(tMin, tMin + scrollRatio * (spanMs - winMs));
+  const viewEnd = Math.min(tMax, viewStart + winMs);
+  const viewRows = rows.filter((r) => {
+    const x = Number(r.x);
+    return x >= viewStart && x <= viewEnd;
+  });
+  const yRows = viewRows.length ? viewRows : rows;
+  const avgCost = getAvgCostForStock(stockId);
+  let yb = computeYBoundsForSvgRows(yRows, stockId, avgCost);
+  if (delistedStocks[stockId]) {
+    yb = {
+      min: Math.min(0, yb.min),
+      max: Math.max(yb.max, 1),
     };
   }
 
-  const volBase = apexCommonChartOpts(88, "bar");
-  const volOpts = {
-    ...volBase,
-    chart: {
-      ...volBase.chart,
-      animations: {
-        enabled: true,
-        easing: "easeinout",
-        speed: 380,
-        dynamicAnimation: { enabled: true, speed: 240 },
-      },
-    },
-    series: [{ name: "거래량", data: volData }],
-    plotOptions: {
-      bar: {
-        columnWidth: "72%",
-        borderRadius: 1,
-      },
-    },
-    xaxis: {
-      ...xa,
-      labels: { show: false },
-    },
-    yaxis: { show: false },
-    tooltip: { enabled: false },
-  };
+  const plotW = contentWidth - DETAIL_SVG_PAD_L - DETAIL_SVG_PAD_R;
+  const plotH = DETAIL_SVG_MAIN_H - DETAIL_SVG_PAD_T - DETAIL_SVG_PAD_B;
 
-  return { mainOpts, volOpts };
+  function xAt(t) {
+    return DETAIL_SVG_PAD_L + ((Number(t) - tMin) / spanMs) * plotW;
+  }
+  function yPrice(price) {
+    const yMin = yb.min;
+    const yMax = yb.max;
+    const span = Math.max(1, yMax - yMin);
+    const tt = (Number(price) - yMin) / span;
+    return DETAIL_SVG_PAD_T + (1 - tt) * plotH;
+  }
+
+  const candleW = Math.max(
+    2,
+    Math.min(12, (plotW / Math.max(8, rows.length)) * 0.72)
+  );
+
+  const mainParts = [];
+  for (let i = 0; i <= 4; i += 1) {
+    const yy = DETAIL_SVG_PAD_T + (plotH * i) / 4;
+    const pv = yb.max - ((yb.max - yb.min) * i) / 4;
+    mainParts.push(
+      `<line x1="${DETAIL_SVG_PAD_L}" y1="${yy}" x2="${contentWidth - DETAIL_SVG_PAD_R}" y2="${yy}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>`
+    );
+    mainParts.push(
+      `<text x="${DETAIL_SVG_PAD_L}" y="${yy - 2}" fill="#8b95a8" font-size="9">${Math.floor(pv).toLocaleString("ko-KR")}</text>`
+    );
+  }
+
+  if (detailChartType === "line") {
+    const pts = rows
+      .map((r) => {
+        const c = Number(r.c);
+        if (!Number.isFinite(c) || c <= 0) return null;
+        return `${xAt(r.x)},${yPrice(c)}`;
+      })
+      .filter(Boolean);
+    const lineColor =
+      rows.length >= 2 && Number(rows[rows.length - 1].c) >= Number(rows[0].c)
+        ? CANDLE_UP
+        : CANDLE_DOWN;
+    if (pts.length === 1) {
+      const [px, py] = pts[0].split(",").map(Number);
+      mainParts.push(
+        `<circle cx="${px}" cy="${py}" r="3" fill="${lineColor}" stroke="${lineColor}" stroke-width="1"/>`
+      );
+    } else if (pts.length > 1) {
+      mainParts.push(
+        `<polyline fill="none" stroke="${lineColor}" stroke-width="2" points="${pts.join(" ")}" />`
+      );
+    }
+  } else {
+    rows.forEach((r) => {
+      const o = Number(r.o);
+      const h = Number(r.h);
+      const l = Number(r.l);
+      const c = Number(r.c);
+      const cx = xAt(r.x);
+      const up = c >= o;
+      const col = up ? CANDLE_UP : CANDLE_DOWN;
+      mainParts.push(
+        `<line x1="${cx}" y1="${yPrice(h)}" x2="${cx}" y2="${yPrice(l)}" stroke="${col}" stroke-width="1.2"/>`
+      );
+      const yTop = yPrice(Math.max(o, c));
+      const yBot = yPrice(Math.min(o, c));
+      const bh = Math.max(1, Math.abs(yBot - yTop));
+      const bw = candleW;
+      mainParts.push(
+        `<rect x="${cx - bw / 2}" y="${Math.min(yTop, yBot)}" width="${bw}" height="${bh}" fill="${col}" fill-opacity="0.92" rx="1"/>`
+      );
+    });
+  }
+
+  if (avgCost != null && avgCost > 0) {
+    const yAvg = yPrice(avgCost);
+    mainParts.push(
+      `<line x1="${DETAIL_SVG_PAD_L}" y1="${yAvg}" x2="${contentWidth - DETAIL_SVG_PAD_R}" y2="${yAvg}" stroke="rgba(250,204,21,0.85)" stroke-dasharray="6" stroke-width="1.2"/>`
+    );
+    mainParts.push(
+      `<text x="${DETAIL_SVG_PAD_L}" y="${Math.max(12, yAvg - 4)}" fill="#facc15" font-size="10">평단</text>`
+    );
+  }
+
+  if (delistedStocks[stockId]) {
+    const yz = yPrice(0);
+    mainParts.push(
+      `<line x1="${DETAIL_SVG_PAD_L}" y1="${yz}" x2="${contentWidth - DETAIL_SVG_PAD_R}" y2="${yz}" stroke="rgba(99,102,241,0.85)" stroke-width="1"/>`
+    );
+    mainParts.push(
+      `<text x="${DETAIL_SVG_PAD_L}" y="${Math.max(12, yz - 4)}" fill="#dbeafe" font-size="10">상장폐지</text>`
+    );
+  }
+
+  for (let k = 0; k <= 4; k += 1) {
+    const tx = tMin + (spanMs * k) / 4;
+    const lx = xAt(tx);
+    const lab = detailChartDatetimeFormatter(tx);
+    mainParts.push(
+      `<text x="${lx}" y="${DETAIL_SVG_MAIN_H - 6}" fill="#8b95a8" font-size="9">${escapeHtml(lab)}</text>`
+    );
+  }
+
+  svgMain.setAttribute("viewBox", `0 0 ${contentWidth} ${DETAIL_SVG_MAIN_H}`);
+  svgMain.setAttribute("width", contentWidth);
+  svgMain.innerHTML = mainParts.join("");
+
+  const vmax = rows.reduce((m, r) => Math.max(m, Number(r.v) || 0), 1);
+  const plotVolH = DETAIL_SVG_VOL_H - DETAIL_SVG_PAD_T - 8;
+  const volParts = [];
+  rows.forEach((r) => {
+    const v = Number(r.v) || 0;
+    const h = Math.max(2, (v / vmax) * plotVolH);
+    const cx = xAt(r.x);
+    const bw = candleW;
+    const up = Number(r.c) >= Number(r.o);
+    const col = up ? CANDLE_UP : CANDLE_DOWN;
+    const y0 = DETAIL_SVG_VOL_H - 8 - h;
+    volParts.push(
+      `<rect x="${cx - bw / 2}" y="${y0}" width="${bw}" height="${h}" fill="${col}" fill-opacity="0.75"/>`
+    );
+  });
+  svgVol.setAttribute("viewBox", `0 0 ${contentWidth} ${DETAIL_SVG_VOL_H}`);
+  svgVol.setAttribute("width", contentWidth);
+  svgVol.innerHTML = volParts.join("");
+
+  innerMain.style.width = `${contentWidth}px`;
+  innerMain.style.minWidth = `${contentWidth}px`;
+  innerVol.style.width = `${contentWidth}px`;
+  innerVol.style.minWidth = `${contentWidth}px`;
+
+  requestAnimationFrame(() => {
+    const w = document.getElementById("detailChartScrollMain");
+    const wv = document.getElementById("detailChartScrollVol");
+    if (!w || !wv) return;
+    const maxScroll = Math.max(0, w.scrollWidth - w.clientWidth);
+    if (preserveScroll && maxScroll > 0) {
+      const next = scrollRatio * maxScroll;
+      w.scrollLeft = next;
+      wv.scrollLeft = next;
+    } else {
+      w.scrollLeft = maxScroll;
+      wv.scrollLeft = maxScroll;
+    }
+  });
+
+  bindDetailChartScrollSyncOnce();
+  bindDetailChartDragPanOnce();
 }
 
 function initDetailCharts(stockId) {
-  if (typeof ApexCharts === "undefined") return;
   const s = getStockById(stockId);
   if (!s) return;
-
-  const cEl = document.getElementById("apexCandleDetail");
-  const vEl = document.getElementById("apexVolumeDetail");
-  if (!cEl || !vEl) return;
-
   destroyDetailCharts();
-  cEl.innerHTML = "";
-  vEl.innerHTML = "";
-
-  const { categories } = getDetailChartCategoriesAndCandleSeries(stockId);
-  const xaPrimary = detailChartXaxisConfig(categories);
-
-  const renderPair = (xa) => {
-    const { mainOpts, volOpts } = buildDetailChartMainAndVolOpts(stockId, xa);
-    apexDetail.candle = new ApexCharts(cEl, mainOpts);
-    apexDetail.vol = new ApexCharts(vEl, volOpts);
-    apexDetail.stockId = stockId;
-    apexDetail.chartRange = detailChartRange;
-    apexDetail.chartType = detailChartType;
-    apexDetail.candle.render();
-    apexDetail.vol.render();
-  };
-
-  try {
-    renderPair(xaPrimary);
-  } catch (e) {
-    console.warn("initDetailCharts (primary xaxis)", e?.message || e);
-    try {
-      destroyDetailCharts();
-      cEl.innerHTML = "";
-      vEl.innerHTML = "";
-      renderPair(detailChartXaxisConfigFallback(categories));
-    } catch (e2) {
-      console.warn("initDetailCharts (fallback xaxis)", e2?.message || e2);
-      apexDetail.candle = null;
-      apexDetail.vol = null;
-      apexDetail.stockId = null;
-    }
-  }
+  renderScrollDetailCharts(stockId, { preserveScroll: false });
 }
 
 function refreshDetailChart() {
-  if (!selectedStockId || !apexDetail.candle || !apexDetail.vol) return;
+  if (!selectedStockId || detailChartView.stockId !== selectedStockId) return;
   const id = selectedStockId;
-  const { categories, candleSeriesData } = getDetailChartCategoriesAndCandleSeries(id);
-  const volPts = buildVolumeSeriesData(id);
-  const volData = volPts.map((p) => ({
-    x: detailChartDatetimeFormatter(p.x),
-    y: p.y,
-    fillColor: p.fillColor,
-  }));
-  const yb = computeDetailChartYBounds(id);
-  const ann = buildDetailChartAnnotations(id);
-  const xaxisShared = detailChartXaxisConfig(categories);
-
-  try {
-    if (detailChartType === "line") {
-      const linePts = buildLineSeriesData(id);
-      const lineColor = detailLineStrokeColor(id);
-      const lineData = linePts.map((p) => ({
-        x: p.x,
-        y: p.y,
-      }));
-      apexDetail.candle.updateSeries([{ name: id, data: lineData }], true);
-      apexDetail.candle.updateOptions(
-        {
-          colors: [lineColor],
-          stroke: {
-            curve: "smooth",
-            width: 2.5,
-            colors: [lineColor],
-          },
-          tooltip: { enabled: false },
-          xaxis: xaxisShared,
-          yaxis: detailChartYaxisConfig(yb),
-          annotations: ann,
-        },
-        false,
-        true
-      );
-    } else {
-      apexDetail.candle.updateSeries([{ name: id, data: candleSeriesData }], true);
-      apexDetail.candle.updateOptions(
-        {
-          tooltip: { enabled: false },
-          xaxis: xaxisShared,
-          yaxis: detailChartYaxisConfig(yb),
-          annotations: ann,
-        },
-        false,
-        true
-      );
-    }
-
-    apexDetail.vol.updateSeries([{ name: "거래량", data: volData }], true);
-    apexDetail.vol.updateOptions(
-      {
-        xaxis: {
-          ...xaxisShared,
-          labels: { show: false },
-        },
-        tooltip: { enabled: false },
-      },
-      false,
-      true
-    );
-  } catch (e) {
-    console.warn("refreshDetailChart", e);
-  }
+  renderScrollDetailCharts(id, { preserveScroll: true });
   updateOrderBookAndStrength(id);
   updateDetailTradeLivePreview();
 }
@@ -5444,7 +5512,7 @@ function openStockDetail(stockId) {
   if (descEl) descEl.textContent = s.desc || "";
 
   detailChartRange = "all";
-  apexDetail.chartRange = "all";
+  detailChartView.chartRange = "all";
   syncDetailChartRangeButtons();
   syncDetailChartTypeButtons();
   detailLastShownPrice = null;
@@ -5465,6 +5533,7 @@ function openStockDetail(stockId) {
 
 function closeStockDetail() {
   selectedStockId = null;
+  detailChartView.stockId = null;
   destroyDetailCharts();
   updatePremarketChartOverlay();
   const list = document.getElementById("marketListView");

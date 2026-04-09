@@ -578,6 +578,60 @@ body {
   animation: chartGapFlash 1.25s ease-out;
 }
 
+.detail-chart-mts-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+}
+
+.detail-chart-scroll-strip {
+  position: relative;
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  cursor: grab;
+  touch-action: pan-x;
+}
+
+.detail-chart-scroll-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.detail-chart-scroll-strip.is-dragging {
+  cursor: grabbing;
+}
+
+.detail-chart-scroll-inner {
+  position: relative;
+  height: 210px;
+  min-height: 210px;
+}
+
+.detail-chart-scroll-inner--vol {
+  height: 88px;
+  min-height: 88px;
+}
+
+.detail-chart-svg {
+  display: block;
+  height: 100%;
+  width: 100%;
+  min-width: 100%;
+}
+
+.detail-chart-svg--main {
+  min-height: 210px;
+}
+
+.detail-chart-svg--vol {
+  min-height: 88px;
+}
+
 .apex-candle {
   position: relative;
   width: 100%;
