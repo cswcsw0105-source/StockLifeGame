@@ -234,7 +234,6 @@
                     전체
                   </button>
                   <button type="button" class="detail-chart-range-btn" data-chart-range="d1">1일</button>
-                  <button type="button" class="detail-chart-range-btn" data-chart-range="d5">5일</button>
                   <button type="button" class="detail-chart-range-btn" data-chart-range="w1">1주</button>
                   <button type="button" class="detail-chart-range-btn" data-chart-range="m1">1달</button>
                 </div>
@@ -280,16 +279,36 @@
                     </p>
                   </div>
                 </div>
-                <div
-                  id="apexCandleDetail"
-                  class="apex-candle"
-                  aria-label="종목 캔들"
-                ></div>
-                <div
-                  id="apexVolumeDetail"
-                  class="apex-vol"
-                  aria-label="거래량"
-                ></div>
+                <div class="detail-chart-mts-wrap" aria-label="상세 차트">
+                  <div
+                    id="detailChartScrollMain"
+                    class="detail-chart-scroll-strip"
+                    aria-label="캔들·선 차트 가로 스크롤"
+                  >
+                    <div id="detailChartInnerMain" class="detail-chart-scroll-inner">
+                      <svg
+                        id="detailChartSvgMain"
+                        class="detail-chart-svg detail-chart-svg--main"
+                        role="img"
+                        aria-label="종목 가격 차트"
+                      ></svg>
+                    </div>
+                  </div>
+                  <div
+                    id="detailChartScrollVol"
+                    class="detail-chart-scroll-strip detail-chart-scroll-strip--vol"
+                    aria-label="거래량 가로 스크롤"
+                  >
+                    <div id="detailChartInnerVol" class="detail-chart-scroll-inner detail-chart-scroll-inner--vol">
+                      <svg
+                        id="detailChartSvgVol"
+                        class="detail-chart-svg detail-chart-svg--vol"
+                        role="img"
+                        aria-label="거래량 차트"
+                      ></svg>
+                    </div>
+                  </div>
+                </div>
               </div>
               <div class="detail-orderbook-panel" id="detailOrderBookPanel" aria-label="10호가·체결강도">
                 <div class="detail-exec-strength">
@@ -650,7 +669,6 @@
         }
       }
     </script>
-    <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
     <script src="config.js"></script>
     <script type="module" src="script.js?v=screen-1"></script>
   </body>
