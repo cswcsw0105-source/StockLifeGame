@@ -93,7 +93,7 @@ const BANK_MAX_LTV = 0.5;
 const DAILY_DIVIDEND_MIN_PRICE = 500;
 const DAILY_DIVIDEND_PER_SHARE = 2;
 const RATIONAL_TRADER_RATIO = 0.5;
-const MAX_DELIST_PER_TICK = 2;
+const MAX_DELIST_PER_TICK = 1;
 /** 긴급 구조(V자) — 초기 상장가 대비 85% 이상 폭락 또는 10원 이하 구간에서 최대 확률 */
 const RESCUE_PROB_CAP_DEEP_CRASH = 0.15;
 /** 재상장 쿨다운: 430~720 '캔들틱'(각 10초) ≈ 현실 1~2시간 */
@@ -851,6 +851,8 @@ const detailChartView = {
 let selectedStockId = null;
 /** 상세 차트 기간: all | d1(당일) | w1 | m1 */
 let detailChartRange = "all";
+/** d1 모드: 0=가장 최근 거래일 세션, 1=그 이전 거래일 … (좌우 스와이프) */
+let detailChartDayOffset = 0;
 
 /** 상세 차트 렌더 방어: 범위별 최대 포인트 수 */
 const DETAIL_CHART_MAX_POINTS = {
@@ -873,6 +875,8 @@ const DETAIL_SVG_PAD_L = 8;
 const DETAIL_SVG_PAD_R = 8;
 const DETAIL_SVG_PAD_T = 8;
 const DETAIL_SVG_PAD_B = 26;
+/** 가로 스크롤 차트: 봉당 최소 픽셀(토스형 촘촘한 간격) */
+const DETAIL_CHART_MIN_CANDLE_SLOT_PX = 6;
 
 /** 상세 차트: candle | line */
 let detailChartType = "candle";
@@ -2723,6 +2727,75 @@ function filterDetailChartRowsForRange(rows, range) {
   return norm;
 }
 
+function uniqueSortedSessionDaysFromRows(rows) {
+  const set = new Set();
+  rows.forEach((r) => {
+    const d = Math.floor(Number(r.dayIndex));
+    if (Number.isFinite(d)) set.add(d);
+  });
+  return Array.from(set).sort((a, b) => a - b);
+}
+
+function getDetailChartSessionDayCount(stockId) {
+  try {
+    const raw = buildFullCanvasRowsForScrollChart(stockId);
+    if (!raw.length) return 0;
+    const norm = raw.map((r) => normalizeCandleRow({ ...r }));
+    return uniqueSortedSessionDaysFromRows(norm).length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * 상세 스크롤 차트용: 실제 저장된 캔들 기준으로 기간을 자르고,
+ * d1은 detailChartDayOffset으로 과거 거래일 세션을 고름.
+ */
+function filterDetailChartRowsForUi(_stockId, normRows) {
+  const range = detailChartRange || "all";
+  if (!normRows.length) return [];
+  const sorted = [...normRows].sort(
+    (a, b) => chartSessionOrdinalFromRow(a) - chartSessionOrdinalFromRow(b)
+  );
+  if (range === "all") return sorted;
+  const days = uniqueSortedSessionDaysFromRows(sorted);
+  if (range === "d1") {
+    if (days.length === 0) return [];
+    detailChartDayOffset = Math.max(
+      0,
+      Math.min(detailChartDayOffset, days.length - 1)
+    );
+    const pick = days.length - 1 - detailChartDayOffset;
+    const targetDay = days[pick];
+    return sorted.filter(
+      (r) => Math.floor(Number(r.dayIndex)) === targetDay
+    );
+  }
+  if (range === "w1") {
+    const take = Math.min(5, days.length);
+    if (take <= 0) return [];
+    const slice = days.slice(-take);
+    const dMin = slice[0];
+    const dMax = slice[slice.length - 1];
+    return sorted.filter((r) => {
+      const di = Math.floor(Number(r.dayIndex));
+      return di >= dMin && di <= dMax;
+    });
+  }
+  if (range === "m1") {
+    const take = Math.min(22, days.length);
+    if (take <= 0) return [];
+    const slice = days.slice(-take);
+    const dMin = slice[0];
+    const dMax = slice[slice.length - 1];
+    return sorted.filter((r) => {
+      const di = Math.floor(Number(r.dayIndex));
+      return di >= dMin && di <= dMax;
+    });
+  }
+  return sorted;
+}
+
 function formatChartOrdinalAxisLabel(ord) {
   const o = Number(ord);
   if (!Number.isFinite(o)) return "—";
@@ -2849,7 +2922,7 @@ function aggregateCandleRows(rows, bucketMinutes) {
   return out;
 }
 
-function buildPreparedDetailRows(stockId) {
+function buildPreparedDetailRows(stockId, opts = {}) {
   const range = detailChartRange || "all";
   const hist = getFilteredCandleHistory(stockId)
     .filter((r) => isValidCandleRow(r))
@@ -2883,7 +2956,11 @@ function buildPreparedDetailRows(stockId) {
       );
     }
   }
-  const aggregated = aggregateCandleRows(rows, aggFactorForDetailRange(range));
+  const bucketBase = aggFactorForDetailRange(range);
+  const forced = Number(opts.forceBucketMinutes);
+  const aggBucket =
+    Number.isFinite(forced) && forced > 0 ? forced : bucketBase;
+  const aggregated = aggregateCandleRows(rows, aggBucket);
   const sampled = sampleRowsForDetailChart(aggregated);
   if (sampled.length > 0) {
     return sampled.sort((a, b) => Number(a.x) - Number(b.x));
@@ -2911,7 +2988,9 @@ function buildPreparedDetailRows(stockId) {
 function buildFullCanvasRowsForScrollChart(stockId) {
   const prev = detailChartRange;
   detailChartRange = "all";
-  const raw = buildPreparedDetailRows(stockId);
+  const raw = buildPreparedDetailRows(stockId, {
+    forceBucketMinutes: CANDLE_GAME_MINUTES,
+  });
   detailChartRange = prev;
   let arr;
   try {
@@ -2995,6 +3074,7 @@ function bindDetailChartRangeUiOnce() {
     if (!r) return;
     detailChartRange = r;
     detailChartView.chartRange = r;
+    if (r === "d1") detailChartDayOffset = 0;
     syncDetailChartRangeButtons();
     if (selectedStockId) {
       initDetailCharts(selectedStockId);
@@ -4215,7 +4295,17 @@ function syncEtfPriceFromMarket() {
       n += 1;
     });
     if (n > 0) {
-      etf.price = clampStockPrice(Math.floor(sum / n));
+      const target = Math.floor(sum / n);
+      const prev = Number(etf.price);
+      if (Number.isFinite(prev) && prev > 0) {
+        const stepCap = Math.max(2, Math.floor(prev * 0.028));
+        const d = target - prev;
+        etf.price = clampStockPrice(
+          prev + Math.max(-stepCap, Math.min(stepCap, d))
+        );
+      } else {
+        etf.price = clampStockPrice(target);
+      }
     } else {
       etf.price = 0;
     }
@@ -4477,7 +4567,10 @@ function oneMicroPriceStep() {
         delete newsSpikeExtremeTarget[id];
       }
       const up = (newsSpikeDirection[id] ?? 1) >= 0;
-      const absDelta = Math.max(1, Math.floor((s.price || 0) * (0.03 + Math.random() * 0.09)));
+      const absDelta = Math.max(
+        1,
+        Math.floor((s.price || 0) * (0.012 + Math.random() * 0.042))
+      );
       const delta = up ? absDelta : -absDelta;
       s.price = clampStockPrice(s.price + delta);
       if (s.price <= 0) {
@@ -4503,11 +4596,11 @@ function oneMicroPriceStep() {
     const anchor = Number(buf?.o) || prevPrice || s.price;
     const pulsePct = anchor > 0 ? ((Number(s.price) - anchor) / anchor) * 100 : 0;
     const fomoState = crowdFomoStateByStock[id] || { buyRush: 0, sellPanic: 0 };
-    if (pulsePct >= 5.0) {
-      fomoState.buyRush = Math.max(fomoState.buyRush, 2 + Math.floor(Math.random() * 4));
+    if (pulsePct >= 6.5) {
+      fomoState.buyRush = Math.max(fomoState.buyRush, 2 + Math.floor(Math.random() * 3));
       fomoState.sellPanic = Math.max(0, fomoState.sellPanic - 1);
-    } else if (pulsePct <= -5.0) {
-      fomoState.sellPanic = Math.max(fomoState.sellPanic, 2 + Math.floor(Math.random() * 4));
+    } else if (pulsePct <= -6.5) {
+      fomoState.sellPanic = Math.max(fomoState.sellPanic, 2 + Math.floor(Math.random() * 3));
       fomoState.buyRush = Math.max(0, fomoState.buyRush - 1);
     } else {
       fomoState.buyRush = Math.max(0, fomoState.buyRush - 1);
@@ -4518,41 +4611,43 @@ function oneMicroPriceStep() {
     const volScale =
       marketTemperature === "hot" ? 1.35 : marketTemperature === "cold" ? 0.72 : 1.0;
     if (isReitId(id)) {
-      delta = randomSignedDeltaByPct(s.price, 0.02 * volScale, 0.05 * volScale);
+      delta = randomSignedDeltaByPct(s.price, 0.016 * volScale, 0.038 * volScale);
     } else {
-      delta = randomSignedDeltaByPct(s.price, 0.02 * volScale, 0.085 * volScale);
-      if (Math.random() < (marketTemperature === "hot" ? 0.2 : 0.12)) {
+      delta = randomSignedDeltaByPct(s.price, 0.018 * volScale, 0.048 * volScale);
+      if (Math.random() < (marketTemperature === "hot" ? 0.08 : 0.05)) {
         const kick = Math.max(
           1,
-          Math.floor((s.price || 0) * ((0.03 + Math.random() * 0.08) * volScale))
+          Math.floor((s.price || 0) * ((0.012 + Math.random() * 0.04) * volScale))
         );
         delta += (Math.random() < 0.5 ? -1 : 1) * kick;
       }
     }
-    if (s.price <= 3 && Math.random() < 0.45) {
+    if (s.price <= 3 && Math.random() < 0.22) {
       delta -= 1;
     }
 
     const liquidity = Math.max(3000, Math.floor((Number(s.price) || 0) * 38));
-    const pressureDelta = Math.trunc((flowRaw / liquidity) * Math.max(12, (s.price || 0) * 0.32));
+    const pressureDelta = Math.trunc(
+      (flowRaw / liquidity) * Math.max(10, (s.price || 0) * 0.16)
+    );
     delta += pressureDelta;
 
     const irrationalCount = Math.max(1, Math.floor(VIRTUAL_TRADER_COUNT * (1 - RATIONAL_TRADER_RATIO)));
     const rationalCount = Math.max(1, VIRTUAL_TRADER_COUNT - irrationalCount);
     if (fomoState.buyRush > 0) {
       const maniaQty = irrationalCount * (30 + Math.floor(Math.random() * 90));
-      const maniaDelta = Math.max(1, Math.floor((maniaQty / liquidity) * Math.max(16, (s.price || 0) * 0.5)));
+      const maniaDelta = Math.max(1, Math.floor((maniaQty / liquidity) * Math.max(12, (s.price || 0) * 0.32)));
       delta += maniaDelta;
       const rationalTakeProfitQty = rationalCount * (20 + Math.floor(Math.random() * 70));
-      const rationalDelta = Math.max(1, Math.floor((rationalTakeProfitQty / liquidity) * Math.max(10, (s.price || 0) * 0.28)));
+      const rationalDelta = Math.max(1, Math.floor((rationalTakeProfitQty / liquidity) * Math.max(8, (s.price || 0) * 0.18)));
       delta -= rationalDelta;
       fomoState.buyRush -= 1;
     } else if (fomoState.sellPanic > 0) {
       const panicQty = irrationalCount * (35 + Math.floor(Math.random() * 100));
-      const panicDelta = Math.max(1, Math.floor((panicQty / liquidity) * Math.max(18, (s.price || 0) * 0.55)));
+      const panicDelta = Math.max(1, Math.floor((panicQty / liquidity) * Math.max(12, (s.price || 0) * 0.36)));
       delta -= panicDelta;
       const rationalDipBuyQty = rationalCount * (20 + Math.floor(Math.random() * 80));
-      const rationalDelta = Math.max(1, Math.floor((rationalDipBuyQty / liquidity) * Math.max(10, (s.price || 0) * 0.25)));
+      const rationalDelta = Math.max(1, Math.floor((rationalDipBuyQty / liquidity) * Math.max(8, (s.price || 0) * 0.17)));
       delta += rationalDelta;
       fomoState.sellPanic -= 1;
     }
@@ -4872,10 +4967,18 @@ function computeYBoundsForSvgRows(viewRows, stockId, avgCost) {
   }
   const span = max - min;
   const pad = Math.max(span * 0.15, 1);
-  return {
-    min: Math.max(0, Math.floor(min - pad)),
-    max: Math.ceil(max + pad),
-  };
+  let outMin = Math.max(0, Math.floor(min - pad));
+  let outMax = Math.ceil(max + pad);
+  if (min > 0 && max / min > 3.2 && prices.length >= 8) {
+    const sorted = [...prices].sort((a, b) => a - b);
+    const n = sorted.length;
+    const qLo = sorted[Math.floor(n * 0.06)] ?? min;
+    const qHi = sorted[Math.min(n - 1, Math.ceil(n * 0.94))] ?? max;
+    const qSpan = Math.max(qHi - qLo, qLo * 0.02, 1);
+    outMin = Math.max(0, Math.floor(qLo - qSpan * 0.12));
+    outMax = Math.ceil(qHi + qSpan * 0.12);
+  }
+  return { min: outMin, max: outMax };
 }
 
 /** 상세 차트 X축 라벨 */
@@ -4971,6 +5074,12 @@ function bindDetailChartDragPanOnce() {
 
   window.addEventListener("mousemove", (e) => {
     if (!dragging) return;
+    if (
+      (detailChartRange || "") === "d1" &&
+      wrapMain.scrollWidth <= wrapMain.clientWidth + 2
+    ) {
+      return;
+    }
     const dx = e.clientX - startX;
     moveBoth(startScroll - dx);
   });
@@ -4997,6 +5106,12 @@ function bindDetailChartDragPanOnce() {
     "touchmove",
     (e) => {
       if (!dragging || e.touches.length !== 1) return;
+      if (
+        (detailChartRange || "") === "d1" &&
+        wrapMain.scrollWidth <= wrapMain.clientWidth + 2
+      ) {
+        return;
+      }
       const dx = e.touches[0].clientX - startX;
       moveBoth(startScroll - dx);
     },
@@ -5010,18 +5125,63 @@ function bindDetailChartDragPanOnce() {
   });
 }
 
-/** 상세 차트: 기간 필터 없이 시간순 캔들만 사용해 X축을 단순 연속 인덱스로 둠 */
+/** 1일 뷰: 좌우 스와이프로 이전/다음 거래일 세션 (가로 스크롤이 없을 때만) */
+function bindDetailChartD1DaySwipeOnce() {
+  const wrap = document.getElementById("detailChartScrollMain");
+  if (!wrap || wrap.dataset.d1SwipeBound === "1") return;
+  wrap.dataset.d1SwipeBound = "1";
+  let sx = 0;
+  let sy = 0;
+  let st = 0;
+  wrap.addEventListener(
+    "touchstart",
+    (e) => {
+      if (e.touches.length !== 1) return;
+      sx = e.touches[0].clientX;
+      sy = e.touches[0].clientY;
+      st = Date.now();
+    },
+    { passive: true }
+  );
+  wrap.addEventListener(
+    "touchend",
+    (e) => {
+      if ((detailChartRange || "") !== "d1" || !selectedStockId) return;
+      const t = e.changedTouches && e.changedTouches[0];
+      if (!t) return;
+      const vw = wrap.clientWidth || 1;
+      if (wrap.scrollWidth > vw + 8) return;
+      const dx = t.clientX - sx;
+      const dy = t.clientY - sy;
+      if (Math.abs(dy) > 75) return;
+      if (Math.abs(dx) < 52) return;
+      if (Date.now() - st > 900) return;
+      const dc = getDetailChartSessionDayCount(selectedStockId);
+      const maxOff = Math.max(0, dc - 1);
+      if (dx < 0) {
+        detailChartDayOffset = Math.min(maxOff, detailChartDayOffset + 1);
+      } else {
+        detailChartDayOffset = Math.max(0, detailChartDayOffset - 1);
+      }
+      initDetailCharts(selectedStockId);
+    },
+    { passive: true }
+  );
+}
+
+/** 상세 차트: 10분봉 기준으로 촘촘히 이어 붙이고, 기간 필터 후 X는 순번(ordinal) */
 function buildOrderedDetailChartRows(stockId) {
   const fullRaw = buildFullCanvasRowsForScrollChart(stockId);
   if (!Array.isArray(fullRaw) || fullRaw.length === 0) return [];
   const norm = fullRaw.map((r) => normalizeCandleRow({ ...r }));
-  norm.sort((a, b) => {
+  const filtered = filterDetailChartRowsForUi(stockId, norm);
+  filtered.sort((a, b) => {
     const ao = Number(a.gameTimeOrdinal);
     const bo = Number(b.gameTimeOrdinal);
     if (Number.isFinite(ao) && Number.isFinite(bo) && ao !== bo) return ao - bo;
     return Number(a.x) - Number(b.x);
   });
-  return norm.map((r, i) => ({ ...r, ord: i }));
+  return filtered.map((r, i) => ({ ...r, ord: i }));
 }
 
 function detailChartAxisLabelFromRow(r) {
@@ -5110,7 +5270,18 @@ function renderScrollDetailCharts(stockId, opts = {}) {
     const tMinOrd = 0;
     const tMaxOrd = n - 1;
     const spanOrd = Math.max(1, tMaxOrd - tMinOrd);
-    const contentWidth = viewportW;
+    const rangeKey = detailChartRange || "all";
+    const isD1 = rangeKey === "d1";
+    const contentWidth = isD1
+      ? viewportW
+      : Math.max(
+          viewportW,
+          Math.ceil(
+            n * DETAIL_CHART_MIN_CANDLE_SLOT_PX +
+              DETAIL_SVG_PAD_L +
+              DETAIL_SVG_PAD_R
+          )
+        );
     const yRows = rows;
     const avgCost = getAvgCostForStock(stockId);
     let yb = computeYBoundsForSvgRows(yRows, stockId, avgCost);
@@ -5152,7 +5323,10 @@ function renderScrollDetailCharts(stockId, opts = {}) {
 
     const candleW = Math.max(
       2,
-      Math.min(12, (plotW / Math.max(8, rows.length)) * 0.72)
+      Math.min(
+        10,
+        (plotW / Math.max(1, n)) * (isD1 ? 0.88 : 0.82)
+      )
     );
 
     const clipMainId = "stockDetailClipMain";
@@ -6190,6 +6364,7 @@ function openStockDetail(stockId) {
 
   detailChartRange = "all";
   detailChartView.chartRange = "all";
+  detailChartDayOffset = 0;
   syncDetailChartRangeButtons();
   syncDetailChartTypeButtons();
   detailLastShownPrice = null;
@@ -7275,6 +7450,7 @@ async function runGameBootstrap() {
   initTabs();
 
   bindDetailChartRangeUiOnce();
+  bindDetailChartD1DaySwipeOnce();
   bindDetailChartTypeToggleOnce();
   loadStockCommunityStore();
   bindStockCommunityOnce();
