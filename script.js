@@ -150,6 +150,8 @@ const MARKET_CLOSE_MIN = 16 * 60 + 30;
 const GAME_MINUTES_PER_DAY = 24 * 60;
 /** 장 시작 전 대기(프리마켓) — 08:00~09:00, 시장가 불가 · 지정가 예약 가능 */
 const PREMARKET_START_MIN = 8 * 60;
+/** 하루 중 08:00~16:30 장 운영 구간 길이(분) — 야간 공백 제외 연속 타임라인 */
+const SESSION_TRADING_MINUTES = MARKET_CLOSE_MIN - PREMARKET_START_MIN;
 /** 08:00~08:50(게임분 480~529): 프리마켓 뉴스 폭격 구간 */
 const PREMARKET_NEWS_END_MIN = 8 * 60 + 50;
 /** 15:30~16:30 시간외 뉴스 스케줄(분) */
@@ -202,6 +204,9 @@ let playerProfile = {
   bankLoanRate: BANK_DAILY_LOAN_RATE,
   /** 가장 비싼 플렉스 소비 아이템 */
   flexTopItemId: "",
+  /** 당일 09:00 장 시작 직후 순자산(일일 손익 기준) */
+  dailyPlSessionStartEquity: null,
+  dailyPlSessionDayIndex: null,
 };
 
 let gameClockEverStarted = false;
@@ -514,7 +519,11 @@ const STOCK_SPECS = [
 
 function memeNewsEligibleSpec(spec) {
   if (!spec) return false;
-  return spec.kind !== "etf" && spec.kind !== "reit";
+  if (spec.kind === "etf" || spec.kind === "reit") return false;
+  if (delistedStocks[spec.id]) return false;
+  const st = getStockById(spec.id);
+  if (!st || Math.floor(Number(st.price) || 0) <= 0) return false;
+  return true;
 }
 
 function memeNewsEligibleId(id) {
@@ -756,6 +765,9 @@ function resetNewsSpikeState() {
 /** 체이닝·일정 등: 페이로드 impact 부호로 방향만 쓰고, 3~5틱 급등·급락 스케줄 */
 function scheduleNewsSpikeForStock(stockId, directionSign) {
   if (!getStockById(stockId) || isEtfId(stockId)) return;
+  if (delistedStocks[stockId]) return;
+  const st0 = getStockById(stockId);
+  if (!st0 || Math.floor(Number(st0.price) || 0) <= 0) return;
   const ticks = 3 + Math.floor(Math.random() * 3);
   newsSpikeTicksLeft[stockId] = Math.max(
     newsSpikeTicksLeft[stockId] || 0,
@@ -1399,6 +1411,16 @@ async function loadUserFromServer() {
     ? Number(prof.bankLoanRate)
     : BANK_DAILY_LOAN_RATE;
   playerProfile.flexTopItemId = typeof prof.flexTopItemId === "string" ? prof.flexTopItemId : "";
+  playerProfile.dailyPlSessionStartEquity =
+    prof.dailyPlSessionStartEquity != null &&
+    Number.isFinite(Number(prof.dailyPlSessionStartEquity))
+      ? Math.floor(Number(prof.dailyPlSessionStartEquity))
+      : null;
+  playerProfile.dailyPlSessionDayIndex =
+    prof.dailyPlSessionDayIndex != null &&
+    Number.isFinite(Number(prof.dailyPlSessionDayIndex))
+      ? Math.floor(Number(prof.dailyPlSessionDayIndex))
+      : null;
   pendingOrders = Array.isArray(prof.pendingOrders)
     ? prof.pendingOrders.filter(
         (o) =>
@@ -2256,6 +2278,16 @@ async function persistUserNow() {
         lastSalaryMonthKey: playerProfile.lastSalaryMonthKey || "",
         lastReitDivMonthKey: playerProfile.lastReitDivMonthKey || "",
         pendingOrders,
+        dailyPlSessionStartEquity:
+          playerProfile.dailyPlSessionStartEquity != null &&
+          Number.isFinite(Number(playerProfile.dailyPlSessionStartEquity))
+            ? Math.floor(Number(playerProfile.dailyPlSessionStartEquity))
+            : null,
+        dailyPlSessionDayIndex:
+          playerProfile.dailyPlSessionDayIndex != null &&
+          Number.isFinite(Number(playerProfile.dailyPlSessionDayIndex))
+            ? Math.floor(Number(playerProfile.dailyPlSessionDayIndex))
+            : null,
       },
       updated_at: new Date().toISOString(),
     })
@@ -2617,38 +2649,57 @@ function candleDateMs(dayIndex, periodStartMin) {
   return d.getTime();
 }
 
-function detailChartRangeWindowMs(range) {
-  const DAY_MS = 24 * 60 * 60 * 1000;
+/** 08:00~16:30 세션만 이어 붙인 단조 증가 X축(야간 공백 제거) */
+function candleRowTradingOrdinal(r) {
+  const nr = normalizeCandleRow(r);
+  const d = Math.floor(Number(nr.dayIndex) || 0);
+  let m = Math.floor(Number(nr.periodStartMin) || PREMARKET_START_MIN);
+  m = Math.max(
+    PREMARKET_START_MIN,
+    Math.min(MARKET_CLOSE_MIN - 1, m)
+  );
+  return d * SESSION_TRADING_MINUTES + (m - PREMARKET_START_MIN);
+}
+
+function detailChartRangeWindowOrdSpan(range) {
   switch (range) {
     case "d1":
-      return 1 * DAY_MS;
+      return SESSION_TRADING_MINUTES;
     case "w1":
-      return 7 * DAY_MS;
+      return 5 * SESSION_TRADING_MINUTES;
     case "m1":
-      return 30 * DAY_MS;
+      return 22 * SESSION_TRADING_MINUTES;
     default:
       return null;
   }
 }
 
+function formatDetailChartOrdinalLabel(ord) {
+  const o = Math.floor(Number(ord) || 0);
+  const d = Math.floor(o / SESSION_TRADING_MINUTES);
+  const off = o - d * SESSION_TRADING_MINUTES;
+  const pm = PREMARKET_START_MIN + off;
+  return formatCandleXLabel(d, pm);
+}
+
 function filterCandleRowsForChartRange(rows, range) {
   if (!rows || rows.length === 0) return [];
   if (range === "all") return rows;
-  const winMs = detailChartRangeWindowMs(range);
-  if (!Number.isFinite(winMs) || winMs <= 0) return rows;
+  const winOrd = detailChartRangeWindowOrdSpan(range);
+  if (!Number.isFinite(winOrd) || winOrd <= 0) return rows;
 
   const normalized = rows
     .map((r) => normalizeCandleRow(r))
-    .filter((r) => Number.isFinite(Number(r?.x)));
+    .filter((r) => Number.isFinite(candleRowTradingOrdinal(r)));
   if (normalized.length === 0) return [];
 
-  const latestTs = normalized.reduce(
-    (m, r) => Math.max(m, Number(r.x)),
+  const latestOrd = normalized.reduce(
+    (m, r) => Math.max(m, candleRowTradingOrdinal(r)),
     -Infinity
   );
-  if (!Number.isFinite(latestTs)) return [];
-  const threshold = latestTs - winMs;
-  return normalized.filter((r) => Number(r.x) >= threshold);
+  if (!Number.isFinite(latestOrd)) return [];
+  const threshold = latestOrd - winOrd;
+  return normalized.filter((r) => candleRowTradingOrdinal(r) >= threshold);
 }
 
 function capDetailChartRows(rows, range) {
@@ -2785,7 +2836,9 @@ function buildPreparedDetailRows(stockId) {
   const aggregated = aggregateCandleRows(rows, aggFactorForDetailRange(range));
   const sampled = sampleRowsForDetailChart(aggregated);
   if (sampled.length > 0) {
-    return sampled.sort((a, b) => Number(a.x) - Number(b.x));
+    return sampled.sort(
+      (a, b) => candleRowTradingOrdinal(a) - candleRowTradingOrdinal(b)
+    );
   }
   if (delistedStocks[stockId]) {
     const x = candleDateMs(gameDayIndex, gameMinutes);
@@ -2801,7 +2854,9 @@ function buildPreparedDetailRows(stockId) {
         c: 0,
         v: 1,
       }),
-    ].sort((a, b) => Number(a.x) - Number(b.x));
+    ].sort(
+      (a, b) => candleRowTradingOrdinal(a) - candleRowTradingOrdinal(b)
+    );
   }
   return sampled;
 }
@@ -2818,7 +2873,7 @@ function buildFullCanvasRowsForScrollChart(stockId) {
   } catch {
     arr = raw.map((r) => ({ ...r }));
   }
-  return arr.sort((a, b) => Number(a.x) - Number(b.x));
+  return arr.sort((a, b) => candleRowTradingOrdinal(a) - candleRowTradingOrdinal(b));
 }
 
 function getAvgCostForStock(stockId) {
@@ -3276,6 +3331,7 @@ function applyOpeningGapFromPremarket() {
   });
 
   snapshotSessionOpen();
+  snapshotDailyPlSessionOpen();
 
   addNewsItem(
     `09:00 시초가 갭 반영 — Net Impact 요약: ${summaryBits.join(" · ")}`,
@@ -3377,6 +3433,14 @@ function recordExecutionFlowTick(stockId, prevPrice, nextPrice) {
   if (!executionFlowByStock[stockId]) {
     executionFlowByStock[stockId] = { buyVol: 1, sellVol: 1 };
   }
+  const stFlow = getStockById(stockId);
+  if (
+    delistedStocks[stockId] ||
+    !stFlow ||
+    Math.floor(Number(stFlow.price) || 0) <= 0
+  ) {
+    return;
+  }
   const flow = executionFlowByStock[stockId];
   flow.buyVol = Math.max(1, flow.buyVol * 0.86);
   flow.sellVol = Math.max(1, flow.sellVol * 0.86);
@@ -3412,6 +3476,15 @@ function updateOrderBookAndStrength(stockId) {
 
   const s = getStockById(stockId);
   if (!s) return;
+
+  if (delistedStocks[stockId] || Math.floor(Number(s.price) || 0) <= 0) {
+    wrap.innerHTML =
+      '<p class="detail-orderbook-hint" style="margin:0">상장폐지 종목 — 가상 호가·체결 없음</p>';
+    pctEl.textContent = "—";
+    bar.style.width = "0%";
+    bar.classList.remove("is-hot", "is-cold");
+    return;
+  }
 
   const flow = executionFlowByStock[stockId] || { buyVol: 1, sellVol: 1 };
   const buyVol = Math.max(1, Number(flow.buyVol) || 1);
@@ -3504,7 +3577,31 @@ function portfolioValue() {
 }
 
 function netWorth() {
-  return clampSafeInteger(clampSafeInteger(game.cash, 0) + portfolioValue(), 0);
+  return (
+    Math.floor(Number(game.cash) || 0) +
+    bankDepositAmount() +
+    portfolioValue() -
+    bankLoanAmount()
+  );
+}
+
+function investableNetEquity() {
+  return netWorth();
+}
+
+/** 09:00 시초가·갭 반영 직후 당일 일손익 기준선 */
+function snapshotDailyPlSessionOpen() {
+  const d = gameDayIndex;
+  if (
+    Number(playerProfile.dailyPlSessionDayIndex) === d &&
+    playerProfile.dailyPlSessionStartEquity != null &&
+    Number.isFinite(Number(playerProfile.dailyPlSessionStartEquity))
+  ) {
+    return;
+  }
+  playerProfile.dailyPlSessionStartEquity = investableNetEquity();
+  playerProfile.dailyPlSessionDayIndex = d;
+  schedulePersistUser();
 }
 
 function bankDepositAmount() {
@@ -4747,7 +4844,7 @@ function computeYBoundsForSvgRows(viewRows, stockId, avgCost) {
     return { min: Math.max(0, min - pad), max: max + pad };
   }
   const span = max - min;
-  const pad = Math.max(span * 0.06, 1);
+  const pad = Math.max(span * 0.15, 1);
   return {
     min: Math.max(0, Math.floor(min - pad)),
     max: Math.ceil(max + pad),
@@ -4926,48 +5023,54 @@ function renderScrollDetailCharts(stockId, opts = {}) {
     return;
   }
 
-  const tMin = Number(rows[0].x);
-  const tMax = Number(rows[rows.length - 1].x);
-  const spanMs = Math.max(1, tMax - tMin);
+  function rowOrd(r) {
+    return candleRowTradingOrdinal(r);
+  }
+  const ordMin = rowOrd(rows[0]);
+  const ordMax = rowOrd(rows[rows.length - 1]);
+  const spanOrd = Math.max(1, ordMax - ordMin);
   const range = detailChartRange || "all";
-  let winMs = spanMs;
+  let winOrd = spanOrd;
   if (range !== "all") {
-    const w = detailChartRangeWindowMs(range);
-    if (Number.isFinite(w) && w > 0) winMs = Math.min(w, spanMs);
+    const w = detailChartRangeWindowOrdSpan(range);
+    if (Number.isFinite(w) && w > 0) winOrd = Math.min(w, spanOrd);
   }
   const contentWidth =
     range === "all"
       ? viewportW
-      : Math.max(viewportW, Math.ceil(viewportW * (spanMs / Math.max(winMs, 1))));
+      : Math.max(viewportW, Math.ceil(viewportW * (spanOrd / Math.max(winOrd, 1))));
 
-  const viewStart = Math.max(tMin, tMin + scrollRatio * (spanMs - winMs));
-  const viewEnd = Math.min(tMax, viewStart + winMs);
+  const viewStartOrd = Math.max(ordMin, ordMin + scrollRatio * (spanOrd - winOrd));
+  const viewEndOrd = Math.min(ordMax, viewStartOrd + winOrd);
   const viewRows = rows.filter((r) => {
-    const x = Number(r.x);
-    return x >= viewStart && x <= viewEnd;
+    const o = rowOrd(r);
+    return o >= viewStartOrd && o <= viewEndOrd;
   });
   const yRows = viewRows.length ? viewRows : rows;
   const avgCost = getAvgCostForStock(stockId);
   let yb = computeYBoundsForSvgRows(yRows, stockId, avgCost);
   if (delistedStocks[stockId]) {
-    yb = {
-      min: Math.min(0, yb.min),
-      max: Math.max(yb.max, 1),
-    };
+    yb = { min: 0, max: 100 };
   }
 
-  const plotW = contentWidth - DETAIL_SVG_PAD_L - DETAIL_SVG_PAD_R;
-  const plotH = DETAIL_SVG_MAIN_H - DETAIL_SVG_PAD_T - DETAIL_SVG_PAD_B;
+  const plotLeft = DETAIL_SVG_PAD_L;
+  const plotTop = DETAIL_SVG_PAD_T;
+  const plotRight = contentWidth - DETAIL_SVG_PAD_R;
+  const plotBottom = DETAIL_SVG_MAIN_H - DETAIL_SVG_PAD_B;
+  const plotW = plotRight - plotLeft;
+  const plotH = plotBottom - plotTop;
 
-  function xAt(t) {
-    return DETAIL_SVG_PAD_L + ((Number(t) - tMin) / spanMs) * plotW;
+  function xAtOrd(o) {
+    return plotLeft + ((Number(o) - ordMin) / spanOrd) * plotW;
   }
   function yPrice(price) {
     const yMin = yb.min;
     const yMax = yb.max;
     const span = Math.max(1, yMax - yMin);
     const tt = (Number(price) - yMin) / span;
-    return DETAIL_SVG_PAD_T + (1 - tt) * plotH;
+    let y = plotTop + (1 - tt) * plotH;
+    if (!Number.isFinite(y)) y = plotBottom;
+    return Math.max(plotTop, Math.min(plotBottom, y));
   }
 
   const candleW = Math.max(
@@ -4975,15 +5078,12 @@ function renderScrollDetailCharts(stockId, opts = {}) {
     Math.min(12, (plotW / Math.max(8, rows.length)) * 0.72)
   );
 
-  const mainParts = [];
+  const clipMainId = "stockDetailClipMain";
+  const clipInner = [];
   for (let i = 0; i <= 4; i += 1) {
-    const yy = DETAIL_SVG_PAD_T + (plotH * i) / 4;
-    const pv = yb.max - ((yb.max - yb.min) * i) / 4;
-    mainParts.push(
-      `<line x1="${DETAIL_SVG_PAD_L}" y1="${yy}" x2="${contentWidth - DETAIL_SVG_PAD_R}" y2="${yy}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>`
-    );
-    mainParts.push(
-      `<text x="${DETAIL_SVG_PAD_L}" y="${yy - 2}" fill="#8b95a8" font-size="9">${Math.floor(pv).toLocaleString("ko-KR")}</text>`
+    const yy = plotTop + (plotH * i) / 4;
+    clipInner.push(
+      `<line x1="${plotLeft}" y1="${yy}" x2="${plotRight}" y2="${yy}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>`
     );
   }
 
@@ -4992,7 +5092,7 @@ function renderScrollDetailCharts(stockId, opts = {}) {
       .map((r) => {
         const c = Number(r.c);
         if (!Number.isFinite(c) || c <= 0) return null;
-        return `${xAt(r.x)},${yPrice(c)}`;
+        return `${xAtOrd(rowOrd(r))},${yPrice(c)}`;
       })
       .filter(Boolean);
     const lineColor =
@@ -5001,11 +5101,11 @@ function renderScrollDetailCharts(stockId, opts = {}) {
         : CANDLE_DOWN;
     if (pts.length === 1) {
       const [px, py] = pts[0].split(",").map(Number);
-      mainParts.push(
+      clipInner.push(
         `<circle cx="${px}" cy="${py}" r="3" fill="${lineColor}" stroke="${lineColor}" stroke-width="1"/>`
       );
     } else if (pts.length > 1) {
-      mainParts.push(
+      clipInner.push(
         `<polyline fill="none" stroke="${lineColor}" stroke-width="2" points="${pts.join(" ")}" />`
       );
     }
@@ -5015,46 +5115,68 @@ function renderScrollDetailCharts(stockId, opts = {}) {
       const h = Number(r.h);
       const l = Number(r.l);
       const c = Number(r.c);
-      const cx = xAt(r.x);
+      const cx = xAtOrd(rowOrd(r));
       const up = c >= o;
       const col = up ? CANDLE_UP : CANDLE_DOWN;
-      mainParts.push(
+      clipInner.push(
         `<line x1="${cx}" y1="${yPrice(h)}" x2="${cx}" y2="${yPrice(l)}" stroke="${col}" stroke-width="1.2"/>`
       );
       const yTop = yPrice(Math.max(o, c));
       const yBot = yPrice(Math.min(o, c));
       const bh = Math.max(1, Math.abs(yBot - yTop));
       const bw = candleW;
-      mainParts.push(
+      clipInner.push(
         `<rect x="${cx - bw / 2}" y="${Math.min(yTop, yBot)}" width="${bw}" height="${bh}" fill="${col}" fill-opacity="0.92" rx="1"/>`
       );
     });
   }
 
-  if (avgCost != null && avgCost > 0) {
+  if (avgCost != null && avgCost > 0 && !delistedStocks[stockId]) {
+    const yAvg = yPrice(avgCost);
+    clipInner.push(
+      `<line x1="${plotLeft}" y1="${yAvg}" x2="${plotRight}" y2="${yAvg}" stroke="rgba(250,204,21,0.85)" stroke-dasharray="6" stroke-width="1.2"/>`
+    );
+  }
+
+  if (delistedStocks[stockId]) {
+    const yz = yPrice(0);
+    clipInner.push(
+      `<line x1="${plotLeft}" y1="${yz}" x2="${plotRight}" y2="${yz}" stroke="rgba(99,102,241,0.85)" stroke-width="1.2"/>`
+    );
+  }
+
+  const mainParts = [];
+  mainParts.push(
+    `<defs><clipPath id="${clipMainId}"><rect x="${plotLeft}" y="${plotTop}" width="${plotW}" height="${plotH}" /></clipPath></defs>`
+  );
+  mainParts.push(`<g clip-path="url(#${clipMainId})">${clipInner.join("")}</g>`);
+
+  for (let i = 0; i <= 4; i += 1) {
+    const yy = plotTop + (plotH * i) / 4;
+    const pv = yb.max - ((yb.max - yb.min) * i) / 4;
+    mainParts.push(
+      `<text x="${plotLeft}" y="${yy - 2}" fill="#8b95a8" font-size="9">${Math.floor(pv).toLocaleString("ko-KR")}</text>`
+    );
+  }
+
+  if (avgCost != null && avgCost > 0 && !delistedStocks[stockId]) {
     const yAvg = yPrice(avgCost);
     mainParts.push(
-      `<line x1="${DETAIL_SVG_PAD_L}" y1="${yAvg}" x2="${contentWidth - DETAIL_SVG_PAD_R}" y2="${yAvg}" stroke="rgba(250,204,21,0.85)" stroke-dasharray="6" stroke-width="1.2"/>`
-    );
-    mainParts.push(
-      `<text x="${DETAIL_SVG_PAD_L}" y="${Math.max(12, yAvg - 4)}" fill="#facc15" font-size="10">평단</text>`
+      `<text x="${plotLeft}" y="${Math.max(12, yAvg - 4)}" fill="#facc15" font-size="10">평단</text>`
     );
   }
 
   if (delistedStocks[stockId]) {
     const yz = yPrice(0);
     mainParts.push(
-      `<line x1="${DETAIL_SVG_PAD_L}" y1="${yz}" x2="${contentWidth - DETAIL_SVG_PAD_R}" y2="${yz}" stroke="rgba(99,102,241,0.85)" stroke-width="1"/>`
-    );
-    mainParts.push(
-      `<text x="${DETAIL_SVG_PAD_L}" y="${Math.max(12, yz - 4)}" fill="#dbeafe" font-size="10">상장폐지</text>`
+      `<text x="${plotLeft}" y="${Math.max(12, yz - 4)}" fill="#dbeafe" font-size="10">상장폐지</text>`
     );
   }
 
   for (let k = 0; k <= 4; k += 1) {
-    const tx = tMin + (spanMs * k) / 4;
-    const lx = xAt(tx);
-    const lab = detailChartDatetimeFormatter(tx);
+    const o = ordMin + (spanOrd * k) / 4;
+    const lx = xAtOrd(o);
+    const lab = formatDetailChartOrdinalLabel(o);
     mainParts.push(
       `<text x="${lx}" y="${DETAIL_SVG_MAIN_H - 6}" fill="#8b95a8" font-size="9">${escapeHtml(lab)}</text>`
     );
@@ -5065,23 +5187,30 @@ function renderScrollDetailCharts(stockId, opts = {}) {
   svgMain.innerHTML = mainParts.join("");
 
   const vmax = rows.reduce((m, r) => Math.max(m, Number(r.v) || 0), 1);
-  const plotVolH = DETAIL_SVG_VOL_H - DETAIL_SVG_PAD_T - 8;
-  const volParts = [];
+  const volPlotTop = DETAIL_SVG_PAD_T;
+  const volPlotBottom = DETAIL_SVG_VOL_H - 8;
+  const volPlotH = volPlotBottom - volPlotTop;
+  const clipVolId = "stockDetailClipVol";
+  const volBars = [];
   rows.forEach((r) => {
     const v = Number(r.v) || 0;
-    const h = Math.max(2, (v / vmax) * plotVolH);
-    const cx = xAt(r.x);
+    const h = Math.max(2, (v / vmax) * volPlotH);
+    const cx = xAtOrd(rowOrd(r));
     const bw = candleW;
     const up = Number(r.c) >= Number(r.o);
     const col = up ? CANDLE_UP : CANDLE_DOWN;
-    const y0 = DETAIL_SVG_VOL_H - 8 - h;
-    volParts.push(
+    const y0 = volPlotBottom - h;
+    volBars.push(
       `<rect x="${cx - bw / 2}" y="${y0}" width="${bw}" height="${h}" fill="${col}" fill-opacity="0.75"/>`
     );
   });
+  const volSvg = [
+    `<defs><clipPath id="${clipVolId}"><rect x="${plotLeft}" y="${volPlotTop}" width="${plotW}" height="${volPlotH}" /></clipPath></defs>`,
+    `<g clip-path="url(#${clipVolId})">${volBars.join("")}</g>`,
+  ];
   svgVol.setAttribute("viewBox", `0 0 ${contentWidth} ${DETAIL_SVG_VOL_H}`);
   svgVol.setAttribute("width", contentWidth);
-  svgVol.innerHTML = volParts.join("");
+  svgVol.innerHTML = volSvg.join("");
 
   innerMain.style.width = `${contentWidth}px`;
   innerMain.style.minWidth = `${contentWidth}px`;
@@ -5114,12 +5243,204 @@ function initDetailCharts(stockId) {
   renderScrollDetailCharts(stockId, { preserveScroll: false });
 }
 
+const LS_STOCK_COMMUNITY = "stockLifeCommunityV1";
+const COMMUNITY_MAX_PER_STOCK = 120;
+let stockCommunityBySymbol = {};
+let lastCommunityAiEmitMs = 0;
+
+const COMMUNITY_AI_LINES = {
+  bull: [
+    "여기 층간소음 없어서 좋네요 ㅋㅋㅋ",
+    "꽉 잡아! 우주로 간다!",
+    "이거 진짜 대박 각 나왔다",
+    "차트 보니까 심장이 두근거림",
+    "물타기 존버 승리다",
+    "기관이 들어온 거 아님? 체결 미쳤네",
+    "내일 시초가 상한가 각",
+  ],
+  bear: [
+    "대주주 구속 수사해라",
+    "이거 진짜 상폐냐? 한강물 따뜻하냐...",
+    "손절 못 하고 물만 먹는 중",
+    "공매도가 판을 치는구나",
+    "경영진 나와서 해명해라",
+    "이 재료로 이 가격? 사기 아님?",
+    "반등은 주는 거야? 미끼야?",
+  ],
+  delist: [
+    "휴지 쪼가리 기념품으로 간직합니다...",
+    "내 청춘 반환해줘",
+    "상폐 전에 한 번만…",
+    "계좌에 흔적도 없이 증발",
+    "다음 생엔 우량주만",
+  ],
+  flat: [
+    "오늘도 옆으로 걷는 주식",
+    "거래량 어디 갔냐",
+    "박스권 탈출 언제냐",
+    "뉴스나 좀 터져라",
+    "지루해서 잠 옴",
+    "호가창이 고요하다…",
+  ],
+};
+
+const COMMUNITY_AI_PREFIXES = [
+  "불타는",
+  "한강러",
+  "삼전사랑",
+  "물타기장인",
+  "동전주왕",
+  "밈주식러",
+  "손절없음",
+  "존버킹",
+  "단타초보",
+  "레버리지러",
+];
+
+function pickCommunityLine(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function randomAiCommunityHandle() {
+  const p = pickCommunityLine(COMMUNITY_AI_PREFIXES);
+  const n = 1000 + Math.floor(Math.random() * 89000);
+  return `${p}${n}`;
+}
+
+function loadStockCommunityStore() {
+  try {
+    const raw = localStorage.getItem(LS_STOCK_COMMUNITY);
+    if (!raw) return;
+    const o = JSON.parse(raw);
+    if (o && typeof o === "object") stockCommunityBySymbol = o;
+  } catch {
+    /* ignore */
+  }
+}
+
+function saveStockCommunityStore() {
+  try {
+    localStorage.setItem(LS_STOCK_COMMUNITY, JSON.stringify(stockCommunityBySymbol));
+  } catch {
+    /* ignore */
+  }
+}
+
+function getStockCommunityRegime(stockId) {
+  if (delistedStocks[stockId]) return "delist";
+  const s = getStockById(stockId);
+  if (!s) return "flat";
+  const open = Number(sessionOpenPrice[stockId]);
+  const p = Math.floor(Number(s.price) || 0);
+  if (!Number.isFinite(open) || open <= 0) return "flat";
+  const pct = ((p - open) / open) * 100;
+  if (pct <= -3) return "bear";
+  if (pct >= 3) return "bull";
+  return "flat";
+}
+
+function pushCommunityEntry(stockId, entry) {
+  if (!stockId || !entry?.text) return;
+  if (!stockCommunityBySymbol[stockId]) stockCommunityBySymbol[stockId] = [];
+  const list = stockCommunityBySymbol[stockId];
+  list.unshift(entry);
+  while (list.length > COMMUNITY_MAX_PER_STOCK) list.pop();
+  saveStockCommunityStore();
+}
+
+function appendRandomCommunityAiPost(stockId) {
+  const regime = getStockCommunityRegime(stockId);
+  const pool = COMMUNITY_AI_LINES[regime] || COMMUNITY_AI_LINES.flat;
+  pushCommunityEntry(stockId, {
+    id: `ai-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    kind: "ai",
+    author: randomAiCommunityHandle(),
+    text: pickCommunityLine(pool),
+    ts: Date.now(),
+  });
+}
+
+function tickStockCommunityAiIfNeeded(stockId) {
+  if (!stockId || tutorialGateActive) return;
+  const now = Date.now();
+  if (now - lastCommunityAiEmitMs < 4000) return;
+  if (Math.random() > 0.32) return;
+  lastCommunityAiEmitMs = now;
+  appendRandomCommunityAiPost(stockId);
+  if (selectedStockId === stockId) renderStockCommunityPanel(stockId);
+}
+
+function renderStockCommunityPanel(stockId) {
+  const ul = document.getElementById("detailCommunityList");
+  if (!ul) return;
+  const items = stockCommunityBySymbol[stockId] || [];
+  if (items.length === 0) {
+    ul.innerHTML = `<li class="detail-community-item detail-community-item--empty">아직 댓글이 없습니다. 첫 글을 남겨 보세요.</li>`;
+    return;
+  }
+  ul.innerHTML = items
+    .map((it) => {
+      const badge =
+        it.kind === "player"
+          ? `<span class="comm-badge comm-badge--player">[주주]</span>`
+          : `<span class="comm-badge comm-badge--ai">[AI]</span>`;
+      const t = new Date(it.ts || Date.now());
+      const timeStr = t.toLocaleTimeString("ko-KR", {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      return `<li class="detail-community-item">
+        <div class="detail-community-meta">
+          <span class="detail-community-author">${escapeHtml(it.author || "익명")}</span>
+          ${badge}
+          <span class="detail-community-time">${escapeHtml(timeStr)}</span>
+        </div>
+        <p class="detail-community-text">${escapeHtml(it.text || "")}</p>
+      </li>`;
+    })
+    .join("");
+}
+
+function bindStockCommunityOnce() {
+  const send = document.getElementById("detailCommunitySend");
+  const input = document.getElementById("detailCommunityInput");
+  if (!send || !input || send.dataset.bound === "1") return;
+  send.dataset.bound = "1";
+  const submit = () => {
+    if (!selectedStockId) return;
+    const raw = String(input.value || "").trim();
+    if (!raw) {
+      setMessage("댓글을 입력해 주세요.", "err");
+      return;
+    }
+    const name =
+      (loginDisplayName && loginDisplayName.trim()) ||
+      (playerProfile?.name && String(playerProfile.name).trim()) ||
+      "플레이어";
+    pushCommunityEntry(selectedStockId, {
+      id: `pl-${Date.now()}`,
+      kind: "player",
+      author: name,
+      text: raw.slice(0, 280),
+      ts: Date.now(),
+    });
+    input.value = "";
+    renderStockCommunityPanel(selectedStockId);
+    setMessage("댓글이 등록되었습니다.", "ok");
+  };
+  send.addEventListener("click", submit);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submit();
+  });
+}
+
 function refreshDetailChart() {
   if (!selectedStockId || detailChartView.stockId !== selectedStockId) return;
   const id = selectedStockId;
   renderScrollDetailCharts(id, { preserveScroll: true });
   updateOrderBookAndStrength(id);
   updateDetailTradeLivePreview();
+  tickStockCommunityAiIfNeeded(id);
 }
 
 /** 예수금·주가 기준 수수료 반영 최대 매수 주수(RPC ROUND와 맞춤) */
@@ -5342,6 +5663,9 @@ function tryEmitExtraRumorChatter() {
 
 function tryFireChainNews(completedCandleCount) {
   Object.keys(NEWS_CHAINS).forEach((stockId) => {
+    if (delistedStocks[stockId]) return;
+    const stCh = getStockById(stockId);
+    if (!stCh || Math.floor(Number(stCh.price) || 0) <= 0) return;
     const sched = CHAIN_SCHEDULE[stockId];
     if (!sched) return;
     const step = chainStepByStock[stockId];
@@ -5368,7 +5692,12 @@ function tryFireMutantNewsEvent(completedCandleCount) {
       Number(s.price) > 0
   );
   const ev = specialEventsGenerator.nextEvent({
-    stocks: candidates.map((s) => ({ id: s.id, name: s.name })),
+    stocks: candidates.map((s) => ({
+      id: s.id,
+      name: s.name,
+      price: s.price,
+      isDelisted: !!delistedStocks[s.id],
+    })),
   });
   if (!ev) return;
   addNewsItem(ev.headline, ev.feedType || "chain", "", {
@@ -5724,6 +6053,7 @@ function openStockDetail(stockId) {
   renderPendingOrdersUi();
   updateDetailTradeLivePreview();
   renderDetailStockNewsSection();
+  renderStockCommunityPanel(stockId);
 }
 
 function closeStockDetail() {
@@ -5965,12 +6295,18 @@ function refreshPortfolioTableCells() {
 
 function renderAssetSummary() {
   const nw = netWorth();
-  const prevBase = ensurePreviousDayAssetsBase();
-  const dayPl = nw - prevBase;
-  const dayPlPct = prevBase > 0 ? (dayPl / prevBase) * 100 : 0;
-  const cumBase = INITIAL_CAPITAL;
-  const totalPl = nw - cumBase;
-  const totalPlPct = cumBase > 0 ? (totalPl / cumBase) * 100 : 0;
+  const eq = investableNetEquity();
+  const d = gameDayIndex;
+  const sd = Number(playerProfile.dailyPlSessionDayIndex);
+  const se = Number(playerProfile.dailyPlSessionStartEquity);
+  const hasDayBase =
+    Number.isFinite(sd) && sd === d && Number.isFinite(se);
+  const dayPl = hasDayBase ? eq - se : 0;
+  const dayPlDen = hasDayBase ? Math.max(1, Math.abs(se)) : 1;
+  const dayPlPct = hasDayBase ? (dayPl / dayPlDen) * 100 : 0;
+  const cumBase = Math.max(1, Math.floor(Number(game.initialCapital) || INITIAL_CAPITAL));
+  const totalPl = eq - cumBase;
+  const totalPlPct = (totalPl / cumBase) * 100;
 
   const totalEl = document.getElementById("summaryTotalProfit");
   const totalPctEl = document.getElementById("summaryTotalProfitPct");
@@ -6630,6 +6966,8 @@ async function runSeason2HardReset() {
   playerProfile.bankDepositRate = BANK_DAILY_DEPOSIT_RATE;
   playerProfile.bankLoanRate = BANK_DAILY_LOAN_RATE;
   playerProfile.flexTopItemId = "";
+  playerProfile.dailyPlSessionStartEquity = null;
+  playerProfile.dailyPlSessionDayIndex = null;
   if (loginDisplayName) writeStartingFundGuard(loginDisplayName);
   game.holdings = {};
   game.costBasis = {};
@@ -6664,7 +7002,6 @@ async function runSeason2HardReset() {
   resetNewsSpikeState();
   resetDailyNewsState();
   clearCandleHistory();
-  snapshotSessionOpen();
   renderPendingOrdersUi();
 
   const msg =
@@ -6682,10 +7019,15 @@ async function runSeason2HardReset() {
       });
       game.cash = 1_000_000;
       game.initialCapital = 1_000_000;
+      playerProfile.dailyPlSessionStartEquity = null;
+      playerProfile.dailyPlSessionDayIndex = null;
     } catch (e) {
       console.warn("runSeason2HardReset rpc", e);
     }
   }
+
+  snapshotSessionOpen();
+  snapshotDailyPlSessionOpen();
 
   renderDateTimeLine();
   renderCalendarUI();
@@ -6733,6 +7075,8 @@ function initNewGame() {
   playerProfile.flexTopItemId = "";
   playerProfile.lastSalaryMonthKey =
     getMonthContextForDayIndex(gameDayIndex).monthKey;
+  playerProfile.dailyPlSessionStartEquity = null;
+  playerProfile.dailyPlSessionDayIndex = null;
 
   stocks.forEach((s) => {
     s.price = randomInitialPrice();
@@ -6760,6 +7104,7 @@ function initNewGame() {
   warmupPrices();
   syncEtfPriceFromMarket();
   snapshotSessionOpen();
+  snapshotDailyPlSessionOpen();
 }
 
 async function runGameBootstrap() {
@@ -6790,6 +7135,8 @@ async function runGameBootstrap() {
 
   bindDetailChartRangeUiOnce();
   bindDetailChartTypeToggleOnce();
+  loadStockCommunityStore();
+  bindStockCommunityOnce();
   bindMarketListFilterUiOnce();
   bindBankAndFlexUiOnce();
 

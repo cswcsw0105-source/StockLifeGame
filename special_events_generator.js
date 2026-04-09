@@ -182,8 +182,17 @@ export function createSpecialEventsGenerator(config = DEFAULT_SPECIAL_EVENT_CONF
     if (!Array.isArray(stocks) || stocks.length === 0) return null;
     if (Math.random() > (config.triggerChancePerCall ?? 0.2)) return null;
 
-    const byId = new Map(stocks.map((s) => [s.id, s]));
-    const idsWithPool = stocks
+    const tradable = stocks.filter(
+      (s) =>
+        s &&
+        s.isDelisted !== true &&
+        Number(s.price) > 0 &&
+        Number.isFinite(Number(s.price))
+    );
+    if (tradable.length === 0) return null;
+
+    const byId = new Map(tradable.map((s) => [s.id, s]));
+    const idsWithPool = tradable
       .map((s) => s.id)
       .filter((id) => Array.isArray(config.keywordPools[id]) && config.keywordPools[id].length > 0);
     if (idsWithPool.length === 0) return null;
