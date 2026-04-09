@@ -2548,12 +2548,15 @@ body {
 .detail-stock-community__composer {
   display: flex;
   gap: 8px;
-  align-items: stretch;
+  align-items: center;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .detail-stock-community__input {
   flex: 1;
   min-width: 0;
+  box-sizing: border-box;
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid var(--border);
@@ -2567,10 +2570,17 @@ body {
   border-color: var(--accent);
 }
 
-.detail-stock-community__send {
-  flex-shrink: 0;
-  padding: 10px 14px;
+/* .btn-mts 전역 width:100% 무효 — 고정 폭 버튼 */
+.detail-stock-community__send.btn-mts {
+  flex: 0 0 auto;
+  width: 80px;
+  min-width: 80px;
+  max-width: 80px;
+  height: 40px;
+  padding: 0 8px;
+  box-sizing: border-box;
   font-size: 0.75rem;
+  line-height: 1.1;
 }
 
 /* ----- 종목 상세: 뉴스·매매 패널 확장 ----- */
