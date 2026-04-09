@@ -94,6 +94,17 @@ const DAILY_DIVIDEND_MIN_PRICE = 500;
 const DAILY_DIVIDEND_PER_SHARE = 2;
 const RATIONAL_TRADER_RATIO = 0.5;
 const MAX_DELIST_PER_TICK = 2;
+/** 긴급 구조(V자) — 초기 상장가 대비 85% 이상 폭락 또는 10원 이하 구간에서 최대 확률 */
+const RESCUE_PROB_CAP_DEEP_CRASH = 0.15;
+/** 재상장 쿨다운: 430~720 '캔들틱'(각 10초) ≈ 현실 1~2시간 */
+const RELIST_COOLDOWN_CANDLE_TICKS_MIN = 430;
+const RELIST_COOLDOWN_CANDLE_TICKS_MAX = 720;
+/** 중앙은행 QE: 위기 비율(상장가 대비 80% 하락 또는 20원 이하) */
+const QE_CRISIS_PRICE_MAX = 20;
+const QE_CRISIS_DROP_FRAC = 0.2;
+const QE_CRISIS_MASS_RATIO = 0.4;
+const QE_PUMP_MIN = 1.3;
+const QE_PUMP_MAX = 1.5;
 /** 게임 캘린더 매월 1일 자동 입금 */
 const MONTHLY_SALARY = 1_000_000;
 /** 이 금액 미만이면 급전 알바 버튼 활성(게임 규칙) */
@@ -216,6 +227,29 @@ function randomInitialPrice() {
   return Math.floor(100 + Math.random() * 101);
 }
 
+/** 재상장 시 상장가 — 동전주 100~500원 */
+function randomRelistIpoPrice() {
+  return 100 + Math.floor(Math.random() * 401);
+}
+
+function computeRelistCooldownMs() {
+  const span =
+    RELIST_COOLDOWN_CANDLE_TICKS_MIN +
+    Math.floor(
+      Math.random() *
+        (RELIST_COOLDOWN_CANDLE_TICKS_MAX - RELIST_COOLDOWN_CANDLE_TICKS_MIN + 1)
+    );
+  return span * TICKS_PER_CANDLE * 1000;
+}
+
+function ensureIpoAnchorForStock(stockId, fallbackPrice) {
+  const v = Number(fallbackPrice);
+  const fb = Number.isFinite(v) && v > 0 ? Math.floor(v) : randomInitialPrice();
+  if (!ipoListingPriceByStock[stockId] || ipoListingPriceByStock[stockId] <= 0) {
+    ipoListingPriceByStock[stockId] = Math.max(100, fb);
+  }
+}
+
 function clampStockPrice(p) {
   const n = Number(p);
   if (!Number.isFinite(n)) return MIN_STOCK_PRICE;
@@ -226,9 +260,16 @@ function clampStockPrice(p) {
 const delistedStocks = {};
 /** 상장폐지 후 재상장 대기 상태 */
 const pendingRelistingByStock = {};
-const RELIST_WAIT_MS = 5 * 60 * 1000;
 const RELIST_ALERT_BEFORE_MS = 60 * 1000;
-const RELIST_BASE_PRICE = 100;
+/** 종목별 초기 상장가(동전주 100~500 등) — 긴급 구조·QE·위기 판정 */
+const ipoListingPriceByStock = {};
+/** 상폐 한도로 1원에 고정된 틱 — 가상 매수 압력 제외 */
+const survivedDelistCapAt1Won = {};
+/** 1원 연속 유지 틱 — 좀비 청산 */
+const consecutive1WonTicks = {};
+/** 데드캣 바운스: bait(미끼) | armed(유저 매수 후 다음 틱 처형) */
+const deadCatTrapState = {};
+let qeCrisisLatchActive = false;
 /** 100명 가상 유저 종목별 잔고(시뮬레이션) */
 const virtualTraderHoldingsByStock = {};
 /** 플레이어/군중 수급 압력(가격 엔진 반영) */
@@ -306,10 +347,13 @@ function burnDelistedShares(stockId, opts = {}) {
 function markStockDelisted(stockId) {
   if (!stockId || delistedStocks[stockId]) return;
   delistedStocks[stockId] = true;
+  delete deadCatTrapState[stockId];
+  const cd = computeRelistCooldownMs();
+  const t0 = Date.now();
   pendingRelistingByStock[stockId] = {
-    startedAt: Date.now(),
-    warnAt: Date.now() + RELIST_WAIT_MS - RELIST_ALERT_BEFORE_MS,
-    relistAt: Date.now() + RELIST_WAIT_MS,
+    startedAt: t0,
+    warnAt: t0 + cd - RELIST_ALERT_BEFORE_MS,
+    relistAt: t0 + cd,
     warned: false,
   };
   const st = getStockById(stockId);
@@ -330,11 +374,15 @@ function executeRelisting(stockId) {
   if (!st) return;
   delistedStocks[stockId] = false;
   delete pendingRelistingByStock[stockId];
+  delete deadCatTrapState[stockId];
+  consecutive1WonTicks[stockId] = 0;
 
-  st.price = RELIST_BASE_PRICE;
+  const relistPx = randomRelistIpoPrice();
+  ipoListingPriceByStock[stockId] = relistPx;
+  st.price = relistPx;
   burnDelistedShares(stockId);
-  sessionOpenPrice[stockId] = RELIST_BASE_PRICE;
-  prevTickPrice[stockId] = RELIST_BASE_PRICE;
+  sessionOpenPrice[stockId] = relistPx;
+  prevTickPrice[stockId] = relistPx;
   candleHistory[stockId] = [];
   delete openingGapBlendByStock[stockId];
   newsSpikeTicksLeft[stockId] = 0;
@@ -343,20 +391,25 @@ function executeRelisting(stockId) {
   delete newsSpikeExtremeTarget[stockId];
   if (candleOhlcBuffer[stockId]) {
     candleOhlcBuffer[stockId] = {
-      o: RELIST_BASE_PRICE,
-      h: RELIST_BASE_PRICE,
-      l: RELIST_BASE_PRICE,
+      o: relistPx,
+      h: relistPx,
+      l: relistPx,
     };
   }
   if (Array.isArray(pendingOrders) && pendingOrders.length > 0) {
     pendingOrders = pendingOrders.filter((o) => o.symbol !== stockId);
   }
   renderPendingOrdersUi();
-  addNewsItem(`[재상장] ${stockId} 종목이 100원 기준가로 재상장되었습니다.`, "news", "", {
-    stockId,
-    global: true,
-  });
-  setMessage(`🚀 ${stockId} 재상장 완료 · 기준가 ${formatWon(RELIST_BASE_PRICE)}`, "ok");
+  addNewsItem(
+    `🎉 [IPO] ${st.name} 경영진 교체 후 화려한 부활! 신규 상장! (기준가 ${relistPx.toLocaleString("ko-KR")}원)`,
+    "news",
+    "",
+    {
+      stockId,
+      global: true,
+    }
+  );
+  setMessage(`🚀 ${st.name}(${stockId}) 재상장 · 기준가 ${formatWon(relistPx)}`, "ok");
   if (selectedStockId === stockId) {
     initDetailCharts(stockId);
   } else {
@@ -1605,10 +1658,12 @@ function applyServerMarketState(m) {
       if (delistedStocks[spec.id]) {
         burnDelistedShares(spec.id, { silent: true, syncServer: false });
         if (!pendingRelistingByStock[spec.id]) {
+          const cd = computeRelistCooldownMs();
+          const t0 = Date.now();
           pendingRelistingByStock[spec.id] = {
-            startedAt: Date.now(),
-            warnAt: Date.now() + RELIST_WAIT_MS - RELIST_ALERT_BEFORE_MS,
-            relistAt: Date.now() + RELIST_WAIT_MS,
+            startedAt: t0,
+            warnAt: t0 + cd - RELIST_ALERT_BEFORE_MS,
+            relistAt: t0 + cd,
             warned: false,
           };
         }
@@ -1618,6 +1673,28 @@ function applyServerMarketState(m) {
     }
   });
   repairInvalidStockPrices();
+
+  STOCK_SPECS.forEach((spec) => {
+    delete ipoListingPriceByStock[spec.id];
+  });
+  if (m.ipoListingPriceByStock && typeof m.ipoListingPriceByStock === "object") {
+    Object.assign(ipoListingPriceByStock, m.ipoListingPriceByStock);
+  }
+  STOCK_SPECS.forEach((spec) => {
+    ensureIpoAnchorForStock(spec.id, getStockById(spec.id)?.price);
+  });
+
+  STOCK_SPECS.forEach((spec) => {
+    delete deadCatTrapState[spec.id];
+    delete consecutive1WonTicks[spec.id];
+  });
+  if (m.deadCatTrapState && typeof m.deadCatTrapState === "object") {
+    Object.assign(deadCatTrapState, m.deadCatTrapState);
+  }
+  if (m.consecutive1WonTicks && typeof m.consecutive1WonTicks === "object") {
+    Object.assign(consecutive1WonTicks, m.consecutive1WonTicks);
+  }
+  qeCrisisLatchActive = m.qeCrisisLatchActive === true;
 
   STOCK_SPECS.forEach((spec) => {
     const id = spec.id;
@@ -1844,6 +1921,10 @@ function serializeMarketState() {
       gameMinutes: it.gameMinutes,
       gameTimeOrdinal: it.gameTimeOrdinal,
     })),
+    ipoListingPriceByStock: { ...ipoListingPriceByStock },
+    deadCatTrapState: JSON.parse(JSON.stringify(deadCatTrapState)),
+    consecutive1WonTicks: { ...consecutive1WonTicks },
+    qeCrisisLatchActive,
   };
 }
 
@@ -3300,6 +3381,15 @@ function recordExecutionFlowTick(stockId, prevPrice, nextPrice) {
   flow.buyVol = Math.max(1, flow.buyVol * 0.86);
   flow.sellVol = Math.max(1, flow.sellVol * 0.86);
 
+  if (survivedDelistCapAt1Won[stockId]) {
+    delete survivedDelistCapAt1Won[stockId];
+    for (let i = 0; i < VIRTUAL_TRADER_COUNT; i += 1) {
+      const qty = 1 + Math.floor(Math.random() * 14);
+      flow.sellVol += qty;
+    }
+    return;
+  }
+
   const prev = Number(prevPrice);
   const next = Number(nextPrice);
   const momentum =
@@ -3840,6 +3930,9 @@ async function buyStock(stockId, quantityRaw, mode = "shares") {
     price: execPx,
     profit: null,
   });
+  if (deadCatTrapState[stockId]?.phase === "bait") {
+    deadCatTrapState[stockId] = { phase: "armed" };
+  }
   return { ok: true };
 }
 
@@ -4061,7 +4154,18 @@ function maybeRescueDelistCandidate(stockId) {
   if (!s || delistedStocks[stockId]) return false;
   const px = Math.max(0, Math.floor(Number(s.price) || 0));
   if (px > 100) return false;
-  const p = marketTemperature === "hot" ? 0.2 : marketTemperature === "cold" ? 0.5 : 0.35;
+  const anchor = Math.max(
+    100,
+    Number(ipoListingPriceByStock[stockId]) ||
+      Number(sessionOpenPrice[stockId]) ||
+      100
+  );
+  const deepCrash =
+    px <= 10 || (anchor > 0 && px <= anchor * (1 - 0.85));
+  let p = marketTemperature === "hot" ? 0.2 : marketTemperature === "cold" ? 0.5 : 0.35;
+  if (deepCrash) {
+    p = Math.min(p, RESCUE_PROB_CAP_DEEP_CRASH);
+  }
   if (Math.random() >= p) return false;
   const isMna = Math.random() < 0.5;
   const jumpPct = isMna ? 0.7 + Math.random() * 1.1 : 0.35 + Math.random() * 0.7;
@@ -4078,12 +4182,99 @@ function maybeRescueDelistCandidate(stockId) {
   return true;
 }
 
+function maybeApplyCentralBankQE() {
+  const listable = stocks.filter(
+    (s) => !isEtfId(s.id) && !isReitId(s.id) && !delistedStocks[s.id]
+  );
+  if (listable.length === 0) return;
+  const crisisIds = [];
+  listable.forEach((s) => {
+    const px = Math.max(0, Math.floor(Number(s.price) || 0));
+    const anchor = Math.max(
+      100,
+      Number(ipoListingPriceByStock[s.id]) ||
+        Number(sessionOpenPrice[s.id]) ||
+        100
+    );
+    const isCrisis =
+      px <= QE_CRISIS_PRICE_MAX || (anchor > 0 && px <= anchor * QE_CRISIS_DROP_FRAC);
+    if (isCrisis) crisisIds.push(s.id);
+  });
+  const ratio = crisisIds.length / listable.length;
+  if (ratio < 0.22) {
+    qeCrisisLatchActive = false;
+  }
+  if (ratio < QE_CRISIS_MASS_RATIO || qeCrisisLatchActive) return;
+  qeCrisisLatchActive = true;
+  marketTemperature = "hot";
+  addNewsItem(
+    "🚨 [긴급속보] 중앙은행 무제한 양적완화 발표! 시장에 돈 푼다!",
+    "news",
+    "",
+    { global: true }
+  );
+  addNewsItem(
+    `🌡️ [시장 온도] ${marketTemperatureLabel("hot")} 진입 · 시스템 위기 대응(QE)`,
+    "news",
+    "",
+    { global: true }
+  );
+  const crisisSet = new Set(crisisIds);
+  listable.forEach((s) => {
+    if (crisisSet.has(s.id)) return;
+    const mult = QE_PUMP_MIN + Math.random() * (QE_PUMP_MAX - QE_PUMP_MIN);
+    s.price = clampStockPrice(Math.floor(Number(s.price) * mult));
+  });
+}
+
+/** 1원 좀비·데드캣(미끼) — 메인 틱 가격 확정 후 */
+function applyPennyStockMicroRules() {
+  stocks.forEach((s) => {
+    const id = s.id;
+    if (isEtfId(id) || isReitId(id) || delistedStocks[id]) return;
+    const px = Math.max(0, Math.floor(Number(s.price) || 0));
+    if (px !== 1) {
+      consecutive1WonTicks[id] = 0;
+      return;
+    }
+    const n = (consecutive1WonTicks[id] || 0) + 1;
+    if (n >= 3) {
+      markStockDelisted(id);
+      return;
+    }
+    consecutive1WonTicks[id] = n;
+    if (deadCatTrapState[id] || n > 2) return;
+    if (Math.random() < 0.2) {
+      const bounce = 2 + Math.floor(Math.random() * 4);
+      s.price = bounce;
+      deadCatTrapState[id] = { phase: "bait" };
+      consecutive1WonTicks[id] = 0;
+      const nm = getStockById(id)?.name || id;
+      addNewsItem(
+        `🍀 [단독] ${nm} 유상증자 철회·채권단 '잠정 양호'… 단기 급등 주의`,
+        "news",
+        "",
+        { stockId: id, global: true }
+      );
+    }
+  });
+}
+
 /**
  * 평상시: 틱당 가격대 비례 무작위 횡보. 뉴스 스파이크: 틱당 대폭 변동.
  * REIT: 정규장 대비 낮은 변동. ETF: 별도 동기화.
  */
 function oneMicroPriceStep() {
   let delistedThisTick = 0;
+  stocks.forEach((s) => {
+    const id = s.id;
+    if (isEtfId(id)) return;
+    if (deadCatTrapState[id]?.phase === "armed" && !delistedStocks[id]) {
+      markStockDelisted(id);
+      delete deadCatTrapState[id];
+    }
+  });
+
   stocks.forEach((s) => {
     const id = s.id;
     if (isEtfId(id)) return;
@@ -4178,6 +4369,7 @@ function oneMicroPriceStep() {
             delistedThisTick += 1;
           } else {
             s.price = 1;
+            survivedDelistCapAt1Won[id] = true;
           }
         }
       }
@@ -4255,6 +4447,7 @@ function oneMicroPriceStep() {
           delistedThisTick += 1;
         } else {
           s.price = 1;
+          survivedDelistCapAt1Won[id] = true;
         }
       }
     }
@@ -4262,6 +4455,8 @@ function oneMicroPriceStep() {
     maybeEmitShockTicker(id, pct);
     recordExecutionFlowTick(id, prevPrice, s.price);
   });
+  applyPennyStockMicroRules();
+  maybeApplyCentralBankQE();
   syncEtfPriceFromMarket();
 }
 
@@ -6453,7 +6648,18 @@ async function runSeason2HardReset() {
     s.price = Math.max(0, Math.floor(Number(spec?.price) || 100));
     delistedStocks[s.id] = false;
     delete pendingRelistingByStock[s.id];
+    ipoListingPriceByStock[s.id] = Math.max(100, Math.floor(s.price));
   });
+  Object.keys(deadCatTrapState).forEach((k) => {
+    delete deadCatTrapState[k];
+  });
+  Object.keys(consecutive1WonTicks).forEach((k) => {
+    delete consecutive1WonTicks[k];
+  });
+  Object.keys(survivedDelistCapAt1Won).forEach((k) => {
+    delete survivedDelistCapAt1Won[k];
+  });
+  qeCrisisLatchActive = false;
 
   resetNewsSpikeState();
   resetDailyNewsState();
@@ -6530,6 +6736,7 @@ function initNewGame() {
 
   stocks.forEach((s) => {
     s.price = randomInitialPrice();
+    ipoListingPriceByStock[s.id] = Math.max(100, s.price);
     delistedStocks[s.id] = false;
     delete pendingRelistingByStock[s.id];
     virtualTraderHoldingsByStock[s.id] = 0;
