@@ -2669,12 +2669,16 @@ function detailChartRangeWindowMs(range) {
 /** 정규장(09:00~15:30) 캔들만 연속 X — 야간·휴장 구간 생략 */
 function chartSessionOrdinalFromRow(r) {
   const row = normalizeCandleRow(r);
-  const day = row.dayIndex;
-  const m = row.periodStartMin;
-  const clamped = Math.max(
-    MARKET_OPEN_MIN,
-    Math.min(MARKET_REGULAR_CLOSE_MIN - 1, m)
-  );
+  const day = Math.floor(Number(row.dayIndex));
+  const m = Number(row.periodStartMin);
+  if (!Number.isFinite(day)) return 0;
+  let clamped = MARKET_OPEN_MIN;
+  if (Number.isFinite(m)) {
+    clamped = Math.max(
+      MARKET_OPEN_MIN,
+      Math.min(MARKET_REGULAR_CLOSE_MIN - 1, m)
+    );
+  }
   const offsetInDay = clamped - MARKET_OPEN_MIN;
   return day * SESSION_GAME_MINUTES + offsetInDay;
 }
@@ -2720,8 +2724,10 @@ function filterDetailChartRowsForRange(rows, range) {
 }
 
 function formatChartOrdinalAxisLabel(ord) {
-  const day = Math.floor(ord / SESSION_GAME_MINUTES);
-  const off = ord - day * SESSION_GAME_MINUTES;
+  const o = Number(ord);
+  if (!Number.isFinite(o)) return "—";
+  const day = Math.floor(o / SESSION_GAME_MINUTES);
+  const off = o - day * SESSION_GAME_MINUTES;
   const periodStartMin = MARKET_OPEN_MIN + off;
   return formatCandleXLabel(day, periodStartMin);
 }
@@ -4855,6 +4861,11 @@ function computeYBoundsForSvgRows(viewRows, stockId, avgCost) {
   }
   let min = Math.min(...prices);
   let max = Math.max(...prices);
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    const px = Math.max(0, Math.floor(Number(getStockById(stockId)?.price) || 0));
+    const fb = Math.max(1, px || 100);
+    return { min: 0, max: Math.ceil(fb * 1.08) };
+  }
   if (min === max) {
     const pad = Math.max(1, Math.floor(min * 0.004) || 1);
     return { min: Math.max(0, min - pad), max: max + pad };
@@ -4999,8 +5010,59 @@ function bindDetailChartDragPanOnce() {
   });
 }
 
+/** 상세 차트: 기간 필터 없이 시간순 캔들만 사용해 X축을 단순 연속 인덱스로 둠 */
+function buildOrderedDetailChartRows(stockId) {
+  const fullRaw = buildFullCanvasRowsForScrollChart(stockId);
+  if (!Array.isArray(fullRaw) || fullRaw.length === 0) return [];
+  const norm = fullRaw.map((r) => normalizeCandleRow({ ...r }));
+  norm.sort((a, b) => {
+    const ao = Number(a.gameTimeOrdinal);
+    const bo = Number(b.gameTimeOrdinal);
+    if (Number.isFinite(ao) && Number.isFinite(bo) && ao !== bo) return ao - bo;
+    return Number(a.x) - Number(b.x);
+  });
+  return norm.map((r, i) => ({ ...r, ord: i }));
+}
+
+function detailChartAxisLabelFromRow(r) {
+  if (!r) return "—";
+  const d = Math.floor(Number(r.dayIndex));
+  const m = Math.floor(Number(r.periodStartMin));
+  if (!Number.isFinite(d) || !Number.isFinite(m)) return "—";
+  return formatCandleXLabel(d, m);
+}
+
+function setDetailChartPlaceholder(
+  svgMain,
+  svgVol,
+  innerMain,
+  innerVol,
+  viewportW,
+  message
+) {
+  innerMain.style.width = `${viewportW}px`;
+  innerVol.style.width = `${viewportW}px`;
+  innerMain.style.minWidth = `${viewportW}px`;
+  innerVol.style.minWidth = `${viewportW}px`;
+  svgMain.setAttribute("viewBox", `0 0 ${viewportW} ${DETAIL_SVG_MAIN_H}`);
+  svgMain.setAttribute("width", viewportW);
+  svgVol.setAttribute("viewBox", `0 0 ${viewportW} ${DETAIL_SVG_VOL_H}`);
+  svgVol.setAttribute("width", viewportW);
+  const msg = escapeHtml(message);
+  const cx = viewportW / 2;
+  svgMain.innerHTML = `<text x="${cx}" y="${DETAIL_SVG_MAIN_H / 2}" fill="#8b95a8" text-anchor="middle" font-size="12">${msg}</text>`;
+  svgVol.innerHTML = `<text x="${cx}" y="${DETAIL_SVG_VOL_H / 2 + 4}" fill="#6b7280" text-anchor="middle" font-size="10">${msg}</text>`;
+}
+
 /**
- * 전체 시계열을 긴 SVG에 그린 뒤, 가로 스크롤로 뷰포트만 이동 (MTS 스와이프)
+ * 상세 차트 렌더 (별칭). 내부적으로 스크롤 SVG 차트를 사용합니다.
+ */
+function renderChart(stockId, opts) {
+  return renderScrollDetailCharts(stockId, opts || {});
+}
+
+/**
+ * 전체 시계열을 SVG에 그린 뒤, 가로 스크롤로 이동 (MTS 스와이프)
  */
 function renderScrollDetailCharts(stockId, opts = {}) {
   const preserveScroll = opts.preserveScroll === true;
@@ -5012,6 +5074,7 @@ function renderScrollDetailCharts(stockId, opts = {}) {
   const svgVol = document.getElementById("detailChartSvgVol");
   if (!wrapMain || !wrapVol || !innerMain || !innerVol || !svgMain || !svgVol) return;
 
+  const viewportW = Math.max(1, wrapMain.clientWidth || 1);
   detailChartView.stockId = stockId;
   detailChartView.chartRange = detailChartRange;
   detailChartView.chartType = detailChartType;
@@ -5022,240 +5085,255 @@ function renderScrollDetailCharts(stockId, opts = {}) {
     scrollRatio = maxScroll > 0 ? wrapMain.scrollLeft / maxScroll : 1;
   }
 
-  const chartRangeKey = detailChartRange || "all";
-  const fullRaw = buildFullCanvasRowsForScrollChart(stockId);
-  let rows = filterDetailChartRowsForRange(fullRaw, chartRangeKey);
-  rows = rows.map((r) => {
-    const base = normalizeCandleRow({ ...r });
-    return { ...base, ord: chartSessionOrdinalFromRow(base) };
-  });
-  rows.sort((a, b) => a.ord - b.ord);
-  const viewportW = Math.max(1, wrapMain.clientWidth || 1);
+  let rows = [];
+  try {
+    rows = buildOrderedDetailChartRows(stockId);
+  } catch (e) {
+    console.warn("buildOrderedDetailChartRows", e);
+    rows = [];
+  }
 
   if (!rows.length) {
-    innerMain.style.width = `${viewportW}px`;
-    innerVol.style.width = `${viewportW}px`;
-    innerMain.style.minWidth = `${viewportW}px`;
-    innerVol.style.minWidth = `${viewportW}px`;
-    svgMain.setAttribute("viewBox", `0 0 ${viewportW} ${DETAIL_SVG_MAIN_H}`);
-    svgMain.setAttribute("width", viewportW);
-    svgVol.setAttribute("viewBox", `0 0 ${viewportW} ${DETAIL_SVG_VOL_H}`);
-    svgVol.setAttribute("width", viewportW);
-    svgMain.innerHTML = "";
-    svgVol.innerHTML = "";
+    setDetailChartPlaceholder(
+      svgMain,
+      svgVol,
+      innerMain,
+      innerVol,
+      viewportW,
+      "데이터 로딩 중…"
+    );
     return;
   }
 
-  const tMinOrd = rows[0].ord;
-  const tMaxOrd = rows[rows.length - 1].ord;
-  const spanOrd = Math.max(1, tMaxOrd - tMinOrd);
-  const range = chartRangeKey;
-  let winOrd = spanOrd;
-  if (range !== "all") {
-    const w = detailChartRangeWindowOrdinal(range);
-    if (Number.isFinite(w) && w > 0) winOrd = Math.min(w, spanOrd);
-  }
-  const contentWidth =
-    range === "all"
-      ? viewportW
-      : Math.max(viewportW, Math.ceil(viewportW * (spanOrd / Math.max(winOrd, 1))));
+  try {
+    const n = rows.length;
+    const tMinOrd = 0;
+    const tMaxOrd = n - 1;
+    const spanOrd = Math.max(1, tMaxOrd - tMinOrd);
+    const contentWidth = viewportW;
+    const yRows = rows;
+    const avgCost = getAvgCostForStock(stockId);
+    let yb = computeYBoundsForSvgRows(yRows, stockId, avgCost);
+    if (delistedStocks[stockId]) {
+      yb = { min: 0, max: 100 };
+    }
+    if (
+      !Number.isFinite(Number(yb.min)) ||
+      !Number.isFinite(Number(yb.max))
+    ) {
+      yb = { min: 0, max: 100 };
+    }
 
-  const viewStartOrd = Math.max(
-    tMinOrd,
-    tMinOrd + scrollRatio * (spanOrd - winOrd)
-  );
-  const viewEndOrd = Math.min(tMaxOrd, viewStartOrd + winOrd);
-  const viewRows = rows.filter(
-    (r) => r.ord >= viewStartOrd && r.ord <= viewEndOrd
-  );
-  const yRows = viewRows.length ? viewRows : rows;
-  const avgCost = getAvgCostForStock(stockId);
-  let yb = computeYBoundsForSvgRows(yRows, stockId, avgCost);
-  if (delistedStocks[stockId]) {
-    yb = { min: 0, max: 100 };
-  }
+    const plotLeft = DETAIL_SVG_PAD_L;
+    const plotTop = DETAIL_SVG_PAD_T;
+    const plotRight = contentWidth - DETAIL_SVG_PAD_R;
+    const plotBottom = DETAIL_SVG_MAIN_H - DETAIL_SVG_PAD_B;
+    const plotW = Math.max(1, plotRight - plotLeft);
+    const plotH = Math.max(1, plotBottom - plotTop);
 
-  const plotLeft = DETAIL_SVG_PAD_L;
-  const plotTop = DETAIL_SVG_PAD_T;
-  const plotRight = contentWidth - DETAIL_SVG_PAD_R;
-  const plotBottom = DETAIL_SVG_MAIN_H - DETAIL_SVG_PAD_B;
-  const plotW = plotRight - plotLeft;
-  const plotH = plotBottom - plotTop;
+    function xAt(ord) {
+      const o = Number(ord);
+      if (!Number.isFinite(o)) return plotLeft;
+      return plotLeft + ((o - tMinOrd) / spanOrd) * plotW;
+    }
+    function yPrice(price) {
+      const yMin = Number(yb.min);
+      const yMax = Number(yb.max);
+      const lo = Number.isFinite(yMin) ? yMin : 0;
+      const hi = Number.isFinite(yMax) ? yMax : Math.max(1, lo + 1);
+      const span = Math.max(1, hi - lo);
+      const p = Number(price);
+      const tNorm = (Number.isFinite(p) ? p : lo) - lo;
+      const tt = tNorm / span;
+      let y = plotTop + (1 - tt) * plotH;
+      if (!Number.isFinite(y)) y = plotBottom;
+      return Math.max(plotTop, Math.min(plotBottom, y));
+    }
 
-  function xAt(ord) {
-    return plotLeft + ((Number(ord) - tMinOrd) / spanOrd) * plotW;
-  }
-  function yPrice(price) {
-    const yMin = yb.min;
-    const yMax = yb.max;
-    const span = Math.max(1, yMax - yMin);
-    const tt = (Number(price) - yMin) / span;
-    let y = plotTop + (1 - tt) * plotH;
-    if (!Number.isFinite(y)) y = plotBottom;
-    return Math.max(plotTop, Math.min(plotBottom, y));
-  }
-
-  const candleW = Math.max(
-    2,
-    Math.min(12, (plotW / Math.max(8, rows.length)) * 0.72)
-  );
-
-  const clipMainId = "stockDetailClipMain";
-  const clipInner = [];
-  for (let i = 0; i <= 4; i += 1) {
-    const yy = plotTop + (plotH * i) / 4;
-    clipInner.push(
-      `<line x1="${plotLeft}" y1="${yy}" x2="${plotRight}" y2="${yy}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>`
+    const candleW = Math.max(
+      2,
+      Math.min(12, (plotW / Math.max(8, rows.length)) * 0.72)
     );
-  }
 
-  if (detailChartType === "line") {
-    const pts = rows
-      .map((r) => {
-        const c = Number(r.c);
-        if (!Number.isFinite(c) || c <= 0) return null;
-        return `${xAt(r.ord)},${yPrice(c)}`;
-      })
-      .filter(Boolean);
-    const lineColor =
-      rows.length >= 2 && Number(rows[rows.length - 1].c) >= Number(rows[0].c)
-        ? CANDLE_UP
-        : CANDLE_DOWN;
-    if (pts.length === 1) {
-      const [px, py] = pts[0].split(",").map(Number);
+    const clipMainId = "stockDetailClipMain";
+    const clipInner = [];
+    for (let i = 0; i <= 4; i += 1) {
+      const yy = plotTop + (plotH * i) / 4;
       clipInner.push(
-        `<circle cx="${px}" cy="${py}" r="3" fill="${lineColor}" stroke="${lineColor}" stroke-width="1"/>`
-      );
-    } else if (pts.length > 1) {
-      clipInner.push(
-        `<polyline fill="none" stroke="${lineColor}" stroke-width="2" points="${pts.join(" ")}" />`
+        `<line x1="${plotLeft}" y1="${yy}" x2="${plotRight}" y2="${yy}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>`
       );
     }
-  } else {
-    rows.forEach((r) => {
-      const o = Number(r.o);
-      const h = Number(r.h);
-      const l = Number(r.l);
-      const c = Number(r.c);
-      const cx = xAt(r.ord);
-      const up = c >= o;
-      const col = up ? CANDLE_UP : CANDLE_DOWN;
+
+    if (detailChartType === "line") {
+      const pts = rows
+        .map((r) => {
+          const c = Number(r.c);
+          if (!Number.isFinite(c) || c <= 0) return null;
+          return `${xAt(r.ord)},${yPrice(c)}`;
+        })
+        .filter(Boolean);
+      const lineColor =
+        rows.length >= 2 &&
+        Number(rows[rows.length - 1].c) >= Number(rows[0].c)
+          ? CANDLE_UP
+          : CANDLE_DOWN;
+      if (pts.length === 1) {
+        const [px, py] = pts[0].split(",").map(Number);
+        if (Number.isFinite(px) && Number.isFinite(py)) {
+          clipInner.push(
+            `<circle cx="${px}" cy="${py}" r="3" fill="${lineColor}" stroke="${lineColor}" stroke-width="1"/>`
+          );
+        }
+      } else if (pts.length > 1) {
+        clipInner.push(
+          `<polyline fill="none" stroke="${lineColor}" stroke-width="2" points="${pts.join(" ")}" />`
+        );
+      }
+    } else {
+      rows.forEach((r) => {
+        const o = Number(r.o);
+        const h = Number(r.h);
+        const l = Number(r.l);
+        const c = Number(r.c);
+        if (![o, h, l, c].every((v) => Number.isFinite(v))) return;
+        const cx = xAt(r.ord);
+        if (!Number.isFinite(cx)) return;
+        const up = c >= o;
+        const col = up ? CANDLE_UP : CANDLE_DOWN;
+        clipInner.push(
+          `<line x1="${cx}" y1="${yPrice(h)}" x2="${cx}" y2="${yPrice(l)}" stroke="${col}" stroke-width="1.2"/>`
+        );
+        const yTop = yPrice(Math.max(o, c));
+        const yBot = yPrice(Math.min(o, c));
+        const bh = Math.max(1, Math.abs(yBot - yTop));
+        const bw = candleW;
+        clipInner.push(
+          `<rect x="${cx - bw / 2}" y="${Math.min(yTop, yBot)}" width="${bw}" height="${bh}" fill="${col}" fill-opacity="0.92" rx="1"/>`
+        );
+      });
+    }
+
+    if (avgCost != null && avgCost > 0 && !delistedStocks[stockId]) {
+      const yAvg = yPrice(avgCost);
       clipInner.push(
-        `<line x1="${cx}" y1="${yPrice(h)}" x2="${cx}" y2="${yPrice(l)}" stroke="${col}" stroke-width="1.2"/>`
+        `<line x1="${plotLeft}" y1="${yAvg}" x2="${plotRight}" y2="${yAvg}" stroke="rgba(250,204,21,0.85)" stroke-dasharray="6" stroke-width="1.2"/>`
       );
-      const yTop = yPrice(Math.max(o, c));
-      const yBot = yPrice(Math.min(o, c));
-      const bh = Math.max(1, Math.abs(yBot - yTop));
-      const bw = candleW;
+    }
+
+    if (delistedStocks[stockId]) {
+      const yz = yPrice(0);
       clipInner.push(
-        `<rect x="${cx - bw / 2}" y="${Math.min(yTop, yBot)}" width="${bw}" height="${bh}" fill="${col}" fill-opacity="0.92" rx="1"/>`
+        `<line x1="${plotLeft}" y1="${yz}" x2="${plotRight}" y2="${yz}" stroke="rgba(99,102,241,0.85)" stroke-width="1.2"/>`
+      );
+    }
+
+    const mainParts = [];
+    mainParts.push(
+      `<defs><clipPath id="${clipMainId}"><rect x="${plotLeft}" y="${plotTop}" width="${plotW}" height="${plotH}" /></clipPath></defs>`
+    );
+    mainParts.push(`<g clip-path="url(#${clipMainId})">${clipInner.join("")}</g>`);
+
+    for (let i = 0; i <= 4; i += 1) {
+      const yy = plotTop + (plotH * i) / 4;
+      const pv = yb.max - ((yb.max - yb.min) * i) / 4;
+      const pvTxt = Number.isFinite(pv)
+        ? Math.floor(pv).toLocaleString("ko-KR")
+        : "—";
+      mainParts.push(
+        `<text x="${plotLeft}" y="${yy - 2}" fill="#8b95a8" font-size="9">${pvTxt}</text>`
+      );
+    }
+
+    if (avgCost != null && avgCost > 0 && !delistedStocks[stockId]) {
+      const yAvg = yPrice(avgCost);
+      mainParts.push(
+        `<text x="${plotLeft}" y="${Math.max(12, yAvg - 4)}" fill="#facc15" font-size="10">평단</text>`
+      );
+    }
+
+    if (delistedStocks[stockId]) {
+      const yz = yPrice(0);
+      mainParts.push(
+        `<text x="${plotLeft}" y="${Math.max(12, yz - 4)}" fill="#dbeafe" font-size="10">상장폐지</text>`
+      );
+    }
+
+    for (let k = 0; k <= 4; k += 1) {
+      const idx = n <= 1 ? 0 : Math.round(((n - 1) * k) / 4);
+      const rAt = rows[idx];
+      const lx = xAt(idx);
+      const lab = detailChartAxisLabelFromRow(rAt);
+      mainParts.push(
+        `<text x="${lx}" y="${DETAIL_SVG_MAIN_H - 6}" fill="#8b95a8" font-size="9">${escapeHtml(lab)}</text>`
+      );
+    }
+
+    svgMain.setAttribute("viewBox", `0 0 ${contentWidth} ${DETAIL_SVG_MAIN_H}`);
+    svgMain.setAttribute("width", contentWidth);
+    svgMain.innerHTML = mainParts.join("");
+
+    const vmax = Math.max(
+      1,
+      rows.reduce((m, r) => Math.max(m, Number(r.v) || 0), 0)
+    );
+    const volPlotTop = DETAIL_SVG_PAD_T;
+    const volPlotBottom = DETAIL_SVG_VOL_H - 8;
+    const volPlotH = volPlotBottom - volPlotTop;
+    const clipVolId = "stockDetailClipVol";
+    const volBars = [];
+    rows.forEach((r) => {
+      const v = Number(r.v) || 0;
+      const h = Math.max(2, (v / vmax) * volPlotH);
+      const cx = xAt(r.ord);
+      const bw = candleW;
+      const up = Number(r.c) >= Number(r.o);
+      const col = up ? CANDLE_UP : CANDLE_DOWN;
+      const y0 = volPlotBottom - h;
+      volBars.push(
+        `<rect x="${cx - bw / 2}" y="${y0}" width="${bw}" height="${h}" fill="${col}" fill-opacity="0.75"/>`
       );
     });
-  }
+    const volSvg = [
+      `<defs><clipPath id="${clipVolId}"><rect x="${plotLeft}" y="${volPlotTop}" width="${plotW}" height="${volPlotH}" /></clipPath></defs>`,
+      `<g clip-path="url(#${clipVolId})">${volBars.join("")}</g>`,
+    ];
+    svgVol.setAttribute("viewBox", `0 0 ${contentWidth} ${DETAIL_SVG_VOL_H}`);
+    svgVol.setAttribute("width", contentWidth);
+    svgVol.innerHTML = volSvg.join("");
 
-  if (avgCost != null && avgCost > 0 && !delistedStocks[stockId]) {
-    const yAvg = yPrice(avgCost);
-    clipInner.push(
-      `<line x1="${plotLeft}" y1="${yAvg}" x2="${plotRight}" y2="${yAvg}" stroke="rgba(250,204,21,0.85)" stroke-dasharray="6" stroke-width="1.2"/>`
+    innerMain.style.width = `${contentWidth}px`;
+    innerMain.style.minWidth = `${contentWidth}px`;
+    innerVol.style.width = `${contentWidth}px`;
+    innerVol.style.minWidth = `${contentWidth}px`;
+
+    requestAnimationFrame(() => {
+      const w = document.getElementById("detailChartScrollMain");
+      const wv = document.getElementById("detailChartScrollVol");
+      if (!w || !wv) return;
+      const maxScroll = Math.max(0, w.scrollWidth - w.clientWidth);
+      if (preserveScroll && maxScroll > 0) {
+        const next = scrollRatio * maxScroll;
+        w.scrollLeft = next;
+        wv.scrollLeft = next;
+      } else {
+        w.scrollLeft = maxScroll;
+        wv.scrollLeft = maxScroll;
+      }
+    });
+
+    bindDetailChartScrollSyncOnce();
+    bindDetailChartDragPanOnce();
+  } catch (e) {
+    console.warn("renderScrollDetailCharts", e);
+    setDetailChartPlaceholder(
+      svgMain,
+      svgVol,
+      innerMain,
+      innerVol,
+      viewportW,
+      "데이터 로딩 중…"
     );
   }
-
-  if (delistedStocks[stockId]) {
-    const yz = yPrice(0);
-    clipInner.push(
-      `<line x1="${plotLeft}" y1="${yz}" x2="${plotRight}" y2="${yz}" stroke="rgba(99,102,241,0.85)" stroke-width="1.2"/>`
-    );
-  }
-
-  const mainParts = [];
-  mainParts.push(
-    `<defs><clipPath id="${clipMainId}"><rect x="${plotLeft}" y="${plotTop}" width="${plotW}" height="${plotH}" /></clipPath></defs>`
-  );
-  mainParts.push(`<g clip-path="url(#${clipMainId})">${clipInner.join("")}</g>`);
-
-  for (let i = 0; i <= 4; i += 1) {
-    const yy = plotTop + (plotH * i) / 4;
-    const pv = yb.max - ((yb.max - yb.min) * i) / 4;
-    mainParts.push(
-      `<text x="${plotLeft}" y="${yy - 2}" fill="#8b95a8" font-size="9">${Math.floor(pv).toLocaleString("ko-KR")}</text>`
-    );
-  }
-
-  if (avgCost != null && avgCost > 0 && !delistedStocks[stockId]) {
-    const yAvg = yPrice(avgCost);
-    mainParts.push(
-      `<text x="${plotLeft}" y="${Math.max(12, yAvg - 4)}" fill="#facc15" font-size="10">평단</text>`
-    );
-  }
-
-  if (delistedStocks[stockId]) {
-    const yz = yPrice(0);
-    mainParts.push(
-      `<text x="${plotLeft}" y="${Math.max(12, yz - 4)}" fill="#dbeafe" font-size="10">상장폐지</text>`
-    );
-  }
-
-  for (let k = 0; k <= 4; k += 1) {
-    const ordK = tMinOrd + (spanOrd * k) / 4;
-    const lx = xAt(ordK);
-    const lab = formatChartOrdinalAxisLabel(ordK);
-    mainParts.push(
-      `<text x="${lx}" y="${DETAIL_SVG_MAIN_H - 6}" fill="#8b95a8" font-size="9">${escapeHtml(lab)}</text>`
-    );
-  }
-
-  svgMain.setAttribute("viewBox", `0 0 ${contentWidth} ${DETAIL_SVG_MAIN_H}`);
-  svgMain.setAttribute("width", contentWidth);
-  svgMain.innerHTML = mainParts.join("");
-
-  const vmax = rows.reduce((m, r) => Math.max(m, Number(r.v) || 0), 1);
-  const volPlotTop = DETAIL_SVG_PAD_T;
-  const volPlotBottom = DETAIL_SVG_VOL_H - 8;
-  const volPlotH = volPlotBottom - volPlotTop;
-  const clipVolId = "stockDetailClipVol";
-  const volBars = [];
-  rows.forEach((r) => {
-    const v = Number(r.v) || 0;
-    const h = Math.max(2, (v / vmax) * volPlotH);
-    const cx = xAt(r.ord);
-    const bw = candleW;
-    const up = Number(r.c) >= Number(r.o);
-    const col = up ? CANDLE_UP : CANDLE_DOWN;
-    const y0 = volPlotBottom - h;
-    volBars.push(
-      `<rect x="${cx - bw / 2}" y="${y0}" width="${bw}" height="${h}" fill="${col}" fill-opacity="0.75"/>`
-    );
-  });
-  const volSvg = [
-    `<defs><clipPath id="${clipVolId}"><rect x="${plotLeft}" y="${volPlotTop}" width="${plotW}" height="${volPlotH}" /></clipPath></defs>`,
-    `<g clip-path="url(#${clipVolId})">${volBars.join("")}</g>`,
-  ];
-  svgVol.setAttribute("viewBox", `0 0 ${contentWidth} ${DETAIL_SVG_VOL_H}`);
-  svgVol.setAttribute("width", contentWidth);
-  svgVol.innerHTML = volSvg.join("");
-
-  innerMain.style.width = `${contentWidth}px`;
-  innerMain.style.minWidth = `${contentWidth}px`;
-  innerVol.style.width = `${contentWidth}px`;
-  innerVol.style.minWidth = `${contentWidth}px`;
-
-  requestAnimationFrame(() => {
-    const w = document.getElementById("detailChartScrollMain");
-    const wv = document.getElementById("detailChartScrollVol");
-    if (!w || !wv) return;
-    const maxScroll = Math.max(0, w.scrollWidth - w.clientWidth);
-    if (preserveScroll && maxScroll > 0) {
-      const next = scrollRatio * maxScroll;
-      w.scrollLeft = next;
-      wv.scrollLeft = next;
-    } else {
-      w.scrollLeft = maxScroll;
-      wv.scrollLeft = maxScroll;
-    }
-  });
-
-  bindDetailChartScrollSyncOnce();
-  bindDetailChartDragPanOnce();
 }
 
 function initDetailCharts(stockId) {
@@ -5279,6 +5357,11 @@ const COMMUNITY_AI_LINES = {
     "물타기 존버 승리다",
     "기관이 들어온 거 아님? 체결 미쳤네",
     "내일 시초가 상한가 각",
+    "추천 ㅊㅊ 이거 왜 안 사 ㄹㅇ",
+    "오늘 저녁은 소고기다 ㅋㅋ",
+    "반등 한 번만… 제발… 아 상승이네 ㅋㅋ",
+    "댓글만 봐도 벌써 수익 각",
+    "이 종목만 믿고 산다 진짜",
   ],
   bear: [
     "대주주 구속 수사해라",
@@ -5288,6 +5371,11 @@ const COMMUNITY_AI_LINES = {
     "경영진 나와서 해명해라",
     "이 재료로 이 가격? 사기 아님?",
     "반등은 주는 거야? 미끼야?",
+    "추천 비추 ㅅㅌㅊ 차라리 현금이 낫다",
+    "ㅈ됐다… 오늘도 마이너스",
+    "왜 샀냐 나 자신아",
+    "답 없다 진짜 ㅠㅠ",
+    "차트 보지 말 걸 그랬다",
   ],
   delist: [
     "휴지 쪼가리 기념품으로 간직합니다...",
@@ -5295,6 +5383,9 @@ const COMMUNITY_AI_LINES = {
     "상폐 전에 한 번만…",
     "계좌에 흔적도 없이 증발",
     "다음 생엔 우량주만",
+    "여기 댓글만 남고 다 갔네…",
+    "ㅠㅠ 진짜 끝인가요",
+    "추천은 사라지고 비추만 남았다",
   ],
   flat: [
     "오늘도 옆으로 걷는 주식",
@@ -5303,30 +5394,69 @@ const COMMUNITY_AI_LINES = {
     "뉴스나 좀 터져라",
     "지루해서 잠 옴",
     "호가창이 고요하다…",
+    "답답하다 그냥…",
+    "댓글만 도배되고 주가는 안 움직여",
+    "이거 스크롤만 하는 중",
+    "오늘도 무슨 일 없음 ㅋ",
   ],
 };
 
-const COMMUNITY_AI_PREFIXES = [
-  "불타는",
-  "한강러",
-  "삼전사랑",
-  "물타기장인",
-  "동전주왕",
-  "밈주식러",
-  "손절없음",
-  "존버킹",
-  "단타초보",
-  "레버리지러",
-];
+/** 위키트리 톡방 느낌의 고정 닉 100명 풀 */
+const COMMUNITY_AI_BOT_NAMES = (() => {
+  const bases = [
+    "불타는천사",
+    "한강물살아",
+    "존버대장",
+    "단타초짜",
+    "삼전맘",
+    "물타기귀신",
+    "동전템플러",
+    "차트무새",
+    "공매도충",
+    "신규양학",
+    "레버리지킹",
+    "밈주인",
+    "시초가헌터",
+    "상한가기원",
+    "하락장인",
+    "분봉마법사",
+    "거래량요정",
+    "기관블러핑",
+    "외인손절",
+    "개미대장",
+    "청산각",
+    "우주가즈아",
+    "반등은사기",
+    "뉴스기다림",
+    "호가창지킴",
+  ];
+  const out = [];
+  for (let i = 0; i < 100; i += 1) {
+    out.push(`${bases[i % bases.length]}${String(i + 1).padStart(2, "0")}`);
+  }
+  return out;
+})();
 
 function pickCommunityLine(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
 function randomAiCommunityHandle() {
-  const p = pickCommunityLine(COMMUNITY_AI_PREFIXES);
-  const n = 1000 + Math.floor(Math.random() * 89000);
-  return `${p}${n}`;
+  return COMMUNITY_AI_BOT_NAMES[
+    Math.floor(Math.random() * COMMUNITY_AI_BOT_NAMES.length)
+  ];
+}
+
+/** 토론방이 비어 있을 때 AI 댓글을 한 번에 채움 */
+function ensureCommunityAiSeed(stockId) {
+  if (!stockId) return;
+  if (!stockCommunityBySymbol[stockId]) stockCommunityBySymbol[stockId] = [];
+  const list = stockCommunityBySymbol[stockId];
+  if (list.length > 0) return;
+  const count = 5 + Math.floor(Math.random() * 4);
+  for (let i = 0; i < count; i += 1) {
+    appendRandomCommunityAiPost(stockId);
+  }
 }
 
 function loadStockCommunityStore() {
@@ -5385,14 +5515,15 @@ function appendRandomCommunityAiPost(stockId) {
 function tickStockCommunityAiIfNeeded(stockId) {
   if (!stockId || tutorialGateActive) return;
   const now = Date.now();
-  if (now - lastCommunityAiEmitMs < 4000) return;
-  if (Math.random() > 0.32) return;
+  if (now - lastCommunityAiEmitMs < 3500) return;
+  if (Math.random() > 0.42) return;
   lastCommunityAiEmitMs = now;
   appendRandomCommunityAiPost(stockId);
   if (selectedStockId === stockId) renderStockCommunityPanel(stockId);
 }
 
 function renderStockCommunityPanel(stockId) {
+  ensureCommunityAiSeed(stockId);
   const ul = document.getElementById("detailCommunityList");
   if (!ul) return;
   const items = stockCommunityBySymbol[stockId] || [];
