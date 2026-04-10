@@ -892,12 +892,12 @@ const DETAIL_CHART_RANGE_MS = {
 };
 /** Sealed candle real-time span (ms) */
 const DETAIL_CHART_REAL_CANDLE_MS = TICKS_PER_CANDLE * 1000;
-/** 상세 캔버스 차트 팔레트 (상승=파랑, 하락=빨강) */
+/** Detail canvas colors: KRX up=red, down=blue */
 const DETAIL_CANVAS = {
-  up: "#4a9eff",
-  down: "#ff5b5b",
-  volUp: "rgba(74,158,255,0.55)",
-  volDown: "rgba(255,91,91,0.55)",
+  up: "#ff5b5b",
+  down: "#4a9eff",
+  volUp: "rgba(255,91,91,0.55)",
+  volDown: "rgba(74,158,255,0.55)",
   ma5: "#ff7043",
   ma20: "#26a69a",
   grid: "rgba(255,255,255,0.07)",
@@ -4943,6 +4943,26 @@ function computeDetailChartYBounds(stockId) {
   };
 }
 
+/** Visible slice only: min(low)*0.85, max(high)*1.15 for canvas Y. */
+function computeDetailCanvasYBoundsVisible(visRows) {
+  if (!visRows || visRows.length === 0) return null;
+  let realMin = Infinity;
+  let realMax = -Infinity;
+  visRows.forEach((r) => {
+    const h = Number(r.h);
+    const l = Number(r.l);
+    if (Number.isFinite(h)) realMax = Math.max(realMax, h);
+    if (Number.isFinite(l)) realMin = Math.min(realMin, l);
+  });
+  if (!Number.isFinite(realMin) || !Number.isFinite(realMax)) return null;
+  if (realMax === -Infinity || realMin === Infinity) return null;
+  const renderMax = realMax * 1.15;
+  const renderMin = realMin * 0.85;
+  const min = Math.max(0, renderMin);
+  const max = Math.max(renderMax, min + 1);
+  return { min, max };
+}
+
 function computeYBoundsForSvgRows(viewRows, stockId, avgCost) {
   const prices = [];
   if (detailChartType === "line") {
@@ -5225,12 +5245,12 @@ function paintDetailChartCanvas(bundle) {
   const n = rows.length;
 
   const visRows = rows.slice(startIdx, endIdx);
-  const avgCost = getAvgCostForStock(stockId);
-  let yb = computeYBoundsForSvgRows(
-    visRows.length ? visRows : rows,
-    stockId,
-    avgCost
-  );
+  let yb = computeDetailCanvasYBoundsVisible(visRows.length ? visRows : rows);
+  if (yb == null) {
+    const px = Math.max(0, Math.floor(Number(getStockById(stockId)?.price) || 0));
+    const fb = Math.max(1, px || 100);
+    yb = { min: 0, max: Math.ceil(fb * 1.08) };
+  }
   if (delistedStocks[stockId]) yb = { min: 0, max: 100 };
   if (!Number.isFinite(Number(yb.min)) || !Number.isFinite(Number(yb.max))) {
     yb = { min: 0, max: 100 };
