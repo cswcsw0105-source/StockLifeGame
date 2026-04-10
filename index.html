@@ -230,12 +230,12 @@
                   role="toolbar"
                   aria-label="차트 기간"
                 >
-                  <button type="button" class="detail-chart-range-btn is-active" data-chart-range="all">
-                    전체
+                  <button type="button" class="detail-chart-range-btn is-active" data-chart-range="d1">
+                    일
                   </button>
-                  <button type="button" class="detail-chart-range-btn" data-chart-range="d1">1일</button>
-                  <button type="button" class="detail-chart-range-btn" data-chart-range="w1">1주</button>
-                  <button type="button" class="detail-chart-range-btn" data-chart-range="m1">1달</button>
+                  <button type="button" class="detail-chart-range-btn" data-chart-range="w1">주</button>
+                  <button type="button" class="detail-chart-range-btn" data-chart-range="m1">월</button>
+                  <button type="button" class="detail-chart-range-btn" data-chart-range="all">전체</button>
                 </div>
                 <div
                   id="detailChartTypeBar"
@@ -281,32 +281,31 @@
                 </div>
                 <div class="detail-chart-mts-wrap" aria-label="상세 차트">
                   <div
-                    id="detailChartScrollMain"
-                    class="detail-chart-scroll-strip"
-                    aria-label="캔들·선 차트 가로 스크롤"
-                  >
-                    <div id="detailChartInnerMain" class="detail-chart-scroll-inner">
-                      <svg
-                        id="detailChartSvgMain"
-                        class="detail-chart-svg detail-chart-svg--main"
-                        role="img"
-                        aria-label="종목 가격 차트"
-                      ></svg>
-                    </div>
-                  </div>
+                    id="detailChartOhlcHud"
+                    class="detail-chart-ohlc-hud"
+                    hidden
+                    aria-live="polite"
+                  ></div>
                   <div
-                    id="detailChartScrollVol"
-                    class="detail-chart-scroll-strip detail-chart-scroll-strip--vol"
-                    aria-label="거래량 가로 스크롤"
+                    id="detailChartCanvasStack"
+                    class="detail-chart-canvas-stack"
+                    aria-label="캔들·거래량 차트"
                   >
-                    <div id="detailChartInnerVol" class="detail-chart-scroll-inner detail-chart-scroll-inner--vol">
-                      <svg
-                        id="detailChartSvgVol"
-                        class="detail-chart-svg detail-chart-svg--vol"
-                        role="img"
-                        aria-label="거래량 차트"
-                      ></svg>
-                    </div>
+                    <canvas
+                      id="detailChartCanvasMain"
+                      class="detail-chart-canvas detail-chart-canvas--main"
+                      aria-label="종목 가격 차트"
+                    ></canvas>
+                    <canvas
+                      id="detailChartCanvasVol"
+                      class="detail-chart-canvas detail-chart-canvas--vol"
+                      aria-label="거래량 차트"
+                    ></canvas>
+                    <canvas
+                      id="detailChartCanvasAxis"
+                      class="detail-chart-canvas detail-chart-canvas--axis"
+                      aria-label="차트 시간축"
+                    ></canvas>
                   </div>
                 </div>
               </div>
