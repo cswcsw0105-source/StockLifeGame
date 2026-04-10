@@ -400,7 +400,7 @@ function executeRelisting(stockId) {
   sessionOpenPrice[stockId] = relistPx;
   prevTickPrice[stockId] = relistPx;
   candleHistory[stockId] = [];
-  console.log(`[executeRelisting] candleHistory cleared for ${stockId} at ${Date.now()}`);
+  console.log(`[executeRelisting] cleared ${stockId} at ${Date.now()}`);
   delete openingGapBlendByStock[stockId];
   newsSpikeTicksLeft[stockId] = 0;
   newsSpikeDirection[stockId] = 1;
@@ -856,16 +856,16 @@ const candleHistory = Object.fromEntries(
   STOCK_SPECS.map((s) => [s.id, []])
 );
 
-/** 상세 화면 캔들/거래량 — SVG 스크롤 뷰포트 엔진 */
+/** Detail view: candles & volume (canvas) */
 const detailChartView = {
   stockId: null,
-  chartRange: "all",
+  chartRange: "d1",
   chartType: "candle",
 };
 
 let selectedStockId = null;
-/** 상세 차트 기간: all | d1(당일) | w1 | m1 */
-let detailChartRange = "all";
+/** 상세 차트 기간: all | d1 | w1 | m1 (UI는 일·주·월) */
+let detailChartRange = "d1";
 
 /** 상세 차트 렌더 방어: 범위별 최대 포인트 수 */
 const DETAIL_CHART_MAX_POINTS = {
@@ -882,6 +882,45 @@ const DETAIL_CHART_BUCKET_MINUTES_BY_RANGE = {
   all: 480,
 };
 const GAME_DAY_MS = 510_000; // 게임 1일(08:00~16:30) = 현실 510초
+/** 상세 차트 탭별 표시 창(ms). all은 무한대(전체) */
+const DETAIL_CHART_RANGE_MS = {
+  d1: 510_000,
+  w1: 510_000 * 7,
+  m1: 510_000 * 30,
+  all: Infinity,
+};
+/** Sealed candle real-time span (ms) */
+const DETAIL_CHART_REAL_CANDLE_MS = TICKS_PER_CANDLE * 1000;
+/** 상세 캔버스 차트 팔레트 (상승=파랑, 하락=빨강) */
+const DETAIL_CANVAS = {
+  up: "#4a9eff",
+  down: "#ff5b5b",
+  volUp: "rgba(74,158,255,0.55)",
+  volDown: "rgba(255,91,91,0.55)",
+  ma5: "#ff7043",
+  ma20: "#26a69a",
+  grid: "rgba(255,255,255,0.07)",
+  axis: "#8b95a8",
+  cross: "rgba(255,255,255,0.25)",
+};
+
+let detailChartLiveBundle = null;
+
+const detailChartInteraction = {
+  viewOffset: 0,
+  velocity: 0,
+  inertiaRaf: 0,
+  dragging: false,
+  pointerDown: false,
+  startClientX: 0,
+  startViewOffset: 0,
+  lastClientX: 0,
+  lastMoveTs: 0,
+  slotPx: 10,
+  maxOffset: 0,
+  crossIdx: null,
+};
+
 const DETAIL_CHART_CANDLES_D1 = Math.max(
   1,
   Math.floor((MARKET_CLOSE_MIN - PREMARKET_START_MIN) / CANDLE_GAME_MINUTES)
@@ -2677,17 +2716,9 @@ function candleDateMs(dayIndex, periodStartMin) {
 }
 
 function detailChartRangeWindowMs(range) {
-  const DAY_MS = 24 * 60 * 60 * 1000;
-  switch (range) {
-    case "d1":
-      return 1 * DAY_MS;
-    case "w1":
-      return 7 * DAY_MS;
-    case "m1":
-      return 30 * DAY_MS;
-    default:
-      return null;
-  }
+  const v = DETAIL_CHART_RANGE_MS[range];
+  if (v === undefined || v === Infinity) return null;
+  return v;
 }
 
 /** 정규장(09:00~15:30) 캔들만 연속 X — 야간·휴장 구간 생략 */
@@ -2767,19 +2798,6 @@ function getDetailChartSessionDayCount(stockId) {
   }
 }
 
-/** 상세 스크롤 차트용: 단순 slice 기반 기간 필터 */
-function filterDetailChartRowsForUi(normRows, range) {
-  if (!normRows.length) return [];
-  const sorted = [...normRows].sort(
-    (a, b) => chartSessionOrdinalFromRow(a) - chartSessionOrdinalFromRow(b)
-  );
-  if (range === "all") return sorted;
-  if (range === "d1") return sorted.slice(-DETAIL_CHART_CANDLES_D1);
-  if (range === "w1") return sorted.slice(-DETAIL_CHART_CANDLES_W1);
-  if (range === "m1") return sorted.slice(-DETAIL_CHART_CANDLES_M1);
-  return sorted;
-}
-
 function formatChartOrdinalAxisLabel(ord) {
   const o = Number(ord);
   if (!Number.isFinite(o)) return "—";
@@ -2791,22 +2809,26 @@ function formatChartOrdinalAxisLabel(ord) {
 
 function filterCandleRowsForChartRange(rows, range) {
   if (!rows || rows.length === 0) return [];
-  if (range === "all") return rows;
-  const winMs = detailChartRangeWindowMs(range);
-  if (!Number.isFinite(winMs) || winMs <= 0) return rows;
-
   const normalized = rows
-    .map((r) => normalizeCandleRow(r))
-    .filter((r) => Number.isFinite(Number(r?.x)));
+    .map((r) => normalizeCandleRow({ ...r }))
+    .filter((r) => isValidCandleRow(r));
   if (normalized.length === 0) return [];
-
-  const latestTs = normalized.reduce(
-    (m, r) => Math.max(m, Number(r.x)),
-    -Infinity
+  normalized.sort(
+    (a, b) => Number(a.gameTimeOrdinal) - Number(b.gameTimeOrdinal)
   );
-  if (!Number.isFinite(latestTs)) return [];
-  const threshold = latestTs - winMs;
-  return normalized.filter((r) => Number(r.x) >= threshold);
+  if (range === "all") return normalized.map((r) => ({ ...r }));
+  const winMs = DETAIL_CHART_RANGE_MS[range];
+  if (winMs === undefined || winMs === Infinity) return normalized.map((r) => ({ ...r }));
+  const now = Date.now();
+  const threshold = now - winMs;
+  return normalized
+    .filter((r) => {
+      const ts = Number(r.timestamp);
+      if (Number.isFinite(ts)) return ts >= threshold;
+      const x = Number(r.x);
+      return Number.isFinite(x) ? x >= threshold : false;
+    })
+    .map((r) => ({ ...r }));
 }
 
 function capDetailChartRows(rows, range) {
@@ -2995,6 +3017,7 @@ function buildFullCanvasRowsForScrollChart(stockId) {
             candlePeriodStartMin
           ),
           x: candleDateMs(gameDayIndex, candlePeriodStartMin),
+          timestamp: Date.now(),
           o: Math.floor(b.o),
           h: Math.floor(Math.max(b.h, s.price)),
           l: Math.floor(Math.min(b.l, s.price)),
@@ -3011,6 +3034,7 @@ function buildFullCanvasRowsForScrollChart(stockId) {
         periodStartMin: gameMinutes,
         gameTimeOrdinal: gameTimeOrdinalFromParts(gameDayIndex, gameMinutes),
         x: candleDateMs(gameDayIndex, gameMinutes),
+        timestamp: Date.now(),
         o: 0,
         h: 0,
         l: 0,
@@ -3092,12 +3116,12 @@ function bindDetailChartRangeUiOnce() {
     const btn = e.target.closest("[data-chart-range]");
     if (!btn) return;
     const r = btn.getAttribute("data-chart-range");
-    if (!r) return;
+    if (!r || (r !== "d1" && r !== "w1" && r !== "m1" && r !== "all")) return;
     detailChartRange = r;
     detailChartView.chartRange = r;
     syncDetailChartRangeButtons();
     if (selectedStockId) {
-      initDetailCharts(selectedStockId);
+      initDetailCharts(selectedStockId, { logChartRange: true });
     }
   });
 }
@@ -5017,497 +5041,698 @@ function bindDetailChartTypeToggleOnce() {
   });
 }
 
-function destroyDetailCharts() {
-  const svgMain = document.getElementById("detailChartSvgMain");
-  const svgVol = document.getElementById("detailChartSvgVol");
-  if (svgMain) svgMain.innerHTML = "";
-  if (svgVol) svgVol.innerHTML = "";
-}
-
-function bindDetailChartScrollSyncOnce() {
-  const wrapMain = document.getElementById("detailChartScrollMain");
-  const wrapVol = document.getElementById("detailChartScrollVol");
-  if (!wrapMain || !wrapVol || wrapMain.dataset.scrollSyncBound === "1") return;
-  wrapMain.dataset.scrollSyncBound = "1";
-  wrapMain.addEventListener(
-    "scroll",
-    () => {
-      wrapVol.scrollLeft = wrapMain.scrollLeft;
-    },
-    { passive: true }
-  );
-}
-
-function bindDetailChartDragPanOnce() {
-  const wrapMain = document.getElementById("detailChartScrollMain");
-  const wrapVol = document.getElementById("detailChartScrollVol");
-  if (!wrapMain || wrapMain.dataset.dragPanBound === "1") return;
-  wrapMain.dataset.dragPanBound = "1";
-
-  let dragging = false;
-  let startX = 0;
-  let startScroll = 0;
-  let lastDx = 0;
-  let lastMoveTs = 0;
-  let velocity = 0;
-  let inertiaRaf = 0;
-
-  const setGrab = (on) => {
-    wrapMain.classList.toggle("is-dragging", on);
-  };
-
-  const moveBoth = (nextLeft) => {
-    const maxScroll = Math.max(0, wrapMain.scrollWidth - wrapMain.clientWidth);
-    const sl = Math.max(0, Math.min(nextLeft, maxScroll));
-    wrapMain.scrollLeft = sl;
-    wrapVol.scrollLeft = sl;
-  };
-  const stopInertia = () => {
-    if (inertiaRaf) {
-      cancelAnimationFrame(inertiaRaf);
-      inertiaRaf = 0;
-    }
-  };
-  const startInertia = () => {
-    stopInertia();
-    const step = () => {
-      velocity *= 0.92;
-      if (Math.abs(velocity) < 0.12) {
-        inertiaRaf = 0;
-        return;
-      }
-      moveBoth(wrapMain.scrollLeft - velocity);
-      const maxScroll = Math.max(0, wrapMain.scrollWidth - wrapMain.clientWidth);
-      if (wrapMain.scrollLeft <= 0 || wrapMain.scrollLeft >= maxScroll) {
-        inertiaRaf = 0;
-        return;
-      }
-      inertiaRaf = requestAnimationFrame(step);
-    };
-    inertiaRaf = requestAnimationFrame(step);
-  };
-
-  wrapMain.addEventListener("mousedown", (e) => {
-    if (e.button !== 0) return;
-    stopInertia();
-    dragging = true;
-    startX = e.clientX;
-    startScroll = wrapMain.scrollLeft;
-    lastDx = 0;
-    velocity = 0;
-    lastMoveTs = Date.now();
-    setGrab(true);
-    e.preventDefault();
-  });
-
-  window.addEventListener("mousemove", (e) => {
-    if (!dragging) return;
-    const now = Date.now();
-    const dx = e.clientX - startX;
-    const dt = Math.max(1, now - lastMoveTs);
-    velocity = (dx - lastDx) / dt * 16;
-    lastMoveTs = now;
-    lastDx = dx;
-    moveBoth(startScroll - dx);
-  });
-
-  window.addEventListener("mouseup", () => {
-    if (!dragging) return;
-    dragging = false;
-    setGrab(false);
-    startInertia();
-  });
-
-  wrapMain.addEventListener(
-    "touchstart",
-    (e) => {
-      if (e.touches.length !== 1) return;
-      stopInertia();
-      dragging = true;
-      startX = e.touches[0].clientX;
-      startScroll = wrapMain.scrollLeft;
-      lastDx = 0;
-      velocity = 0;
-      lastMoveTs = Date.now();
-      setGrab(true);
-    },
-    { passive: true }
-  );
-
-  window.addEventListener(
-    "touchmove",
-    (e) => {
-      if (!dragging || e.touches.length !== 1) return;
-      const now = Date.now();
-      const dx = e.touches[0].clientX - startX;
-      const dt = Math.max(1, now - lastMoveTs);
-      velocity = (dx - lastDx) / dt * 16;
-      lastMoveTs = now;
-      lastDx = dx;
-      moveBoth(startScroll - dx);
-    },
-    { passive: true }
-  );
-
-  window.addEventListener("touchend", () => {
-    if (!dragging) return;
-    dragging = false;
-    setGrab(false);
-    startInertia();
-  });
-}
-
-/** 1일 뷰는 별도 날짜 전환 대신 동일한 가로 스크롤 제스처를 사용 */
+/** d1: horizontal pan only (no separate day swipe) */
 function bindDetailChartD1DaySwipeOnce() {
   return;
 }
 
-/** 상세 차트: 10분봉 기준으로 촘촘히 이어 붙이고, 기간 필터 후 X는 순번(ordinal) */
-function buildOrderedDetailChartRows(stockId) {
+/** candleHistory 기반 복제 행 + RANGE_MS 필터 (원본 배열 미변경) */
+function buildDetailChartRowsFiltered(stockId) {
   const fullRaw = buildFullCanvasRowsForScrollChart(stockId);
-  if (!Array.isArray(fullRaw) || fullRaw.length === 0) return [];
-  const norm = fullRaw.map((r) => normalizeCandleRow({ ...r }));
-  const filtered = filterDetailChartRowsForUi(norm, detailChartRange || "all");
-  filtered.sort((a, b) => {
-    const ao = Number(a.gameTimeOrdinal);
-    const bo = Number(b.gameTimeOrdinal);
-    if (Number.isFinite(ao) && Number.isFinite(bo) && ao !== bo) return ao - bo;
-    return Number(a.x) - Number(b.x);
-  });
-  return filtered.map((r, i) => ({ ...r, ord: i }));
+  if (!fullRaw.length) return [];
+  const range = detailChartRange || "d1";
+  return filterCandleRowsForChartRange(fullRaw, range);
 }
 
 function detailChartAxisLabelFromRow(r) {
   if (!r) return "—";
-  const d = Math.floor(Number(r.dayIndex));
-  const m = Math.floor(Number(r.periodStartMin));
-  if (!Number.isFinite(d) || !Number.isFinite(m)) return "—";
-  return formatCandleXLabel(d, m);
+  const ts = Number(r.timestamp);
+  if (Number.isFinite(ts)) {
+    const d = new Date(ts);
+    return `${d.getMonth() + 1}/${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  }
+  const d0 = Math.floor(Number(r.dayIndex));
+  const m0 = Math.floor(Number(r.periodStartMin));
+  if (!Number.isFinite(d0) || !Number.isFinite(m0)) return "—";
+  return formatCandleXLabel(d0, m0);
 }
 
-function setDetailChartPlaceholder(
-  svgMain,
-  svgVol,
-  innerMain,
-  innerVol,
-  viewportW,
-  message
-) {
-  innerMain.style.width = `${viewportW}px`;
-  innerVol.style.width = `${viewportW}px`;
-  innerMain.style.minWidth = `${viewportW}px`;
-  innerVol.style.minWidth = `${viewportW}px`;
-  svgMain.setAttribute("viewBox", `0 0 ${viewportW} ${DETAIL_SVG_MAIN_H}`);
-  svgMain.setAttribute("width", viewportW);
-  svgVol.setAttribute("viewBox", `0 0 ${viewportW} ${DETAIL_SVG_VOL_H}`);
-  svgVol.setAttribute("width", viewportW);
-  const msg = escapeHtml(message);
-  const cx = viewportW / 2;
-  svgMain.innerHTML = `<text x="${cx}" y="${DETAIL_SVG_MAIN_H / 2}" fill="#8b95a8" text-anchor="middle" font-size="12">${msg}</text>`;
-  svgVol.innerHTML = `<text x="${cx}" y="${DETAIL_SVG_VOL_H / 2 + 4}" fill="#6b7280" text-anchor="middle" font-size="10">${msg}</text>`;
+const DETAIL_CANDLE_W = 8;
+const DETAIL_CANDLE_GAP = 2;
+const DETAIL_STEP = DETAIL_CANDLE_W + DETAIL_CANDLE_GAP;
+const DETAIL_X_LABEL_MIN_GAP = 80;
+
+function calcMA(candles, period) {
+  return candles.map((_, i) => {
+    if (i < period - 1) return null;
+    const slice = candles.slice(i - period + 1, i + 1);
+    return slice.reduce((s, c) => s + c.close, 0) / period;
+  });
 }
 
-/**
- * 상세 차트 렌더 (별칭). 내부적으로 스크롤 SVG 차트를 사용합니다.
- */
+function applyDetailChartViewport(bundle) {
+  const { rows, plotInnerW } = bundle;
+  const n = rows.length;
+  const visCap = Math.max(1, Math.floor(plotInnerW / DETAIL_STEP));
+  if (n === 0) {
+    bundle.startIdx = 0;
+    bundle.endIdx = 0;
+    bundle.step = DETAIL_STEP;
+    bundle.candleW = DETAIL_CANDLE_W;
+    bundle.maxOffset = 0;
+    bundle.spread = true;
+    detailChartInteraction.viewOffset = 0;
+    detailChartInteraction.maxOffset = 0;
+    return;
+  }
+  if (n <= visCap) {
+    detailChartInteraction.viewOffset = 0;
+    detailChartInteraction.maxOffset = 0;
+    bundle.startIdx = 0;
+    bundle.endIdx = n;
+    bundle.step = plotInnerW / n;
+    bundle.candleW = Math.max(2, Math.min(20, bundle.step - DETAIL_CANDLE_GAP));
+    bundle.maxOffset = 0;
+    bundle.spread = true;
+    return;
+  }
+  const maxOff = n - visCap;
+  let vo = Number(detailChartInteraction.viewOffset);
+  if (!Number.isFinite(vo)) vo = 0;
+  vo = Math.max(0, Math.min(maxOff, vo));
+  detailChartInteraction.viewOffset = vo;
+  detailChartInteraction.maxOffset = maxOff;
+  bundle.startIdx = Math.max(0, n - vo - visCap);
+  bundle.endIdx = n - vo;
+  bundle.step = DETAIL_STEP;
+  bundle.candleW = DETAIL_CANDLE_W;
+  bundle.maxOffset = maxOff;
+  bundle.spread = false;
+}
+
+function detailChartXCandleCenter(i, bundle) {
+  const { plotLeft, startIdx, step } = bundle;
+  return plotLeft + (i - startIdx) * step + step / 2;
+}
+
+function detailChartIndexFromClientX(clientX, canvas, bundle) {
+  applyDetailChartViewport(bundle);
+  const rect = canvas.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const { plotLeft, plotInnerW, startIdx, endIdx, step, rows } = bundle;
+  if (x < plotLeft || x > plotLeft + plotInnerW) return null;
+  const rel = x - plotLeft;
+  const fi = (rel - step / 2) / step + startIdx;
+  const idx = Math.round(fi);
+  if (idx < startIdx || idx >= endIdx || idx >= rows.length) return null;
+  return idx;
+}
+
+function stopDetailChartInertia() {
+  if (detailChartInteraction.inertiaRaf) {
+    cancelAnimationFrame(detailChartInteraction.inertiaRaf);
+    detailChartInteraction.inertiaRaf = 0;
+  }
+  detailChartInteraction.velocity = 0;
+}
+
+function resizeDetailCanvas(canvas, cssW, cssH) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.floor(cssW * dpr));
+  const h = Math.max(1, Math.floor(cssH * dpr));
+  if (canvas.width !== w) canvas.width = w;
+  if (canvas.height !== h) canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return dpr;
+}
+
+function updateDetailChartOhlcHud(row) {
+  const el = document.getElementById("detailChartOhlcHud");
+  if (!el) return;
+  if (!row) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  const o = Math.floor(Number(row.o));
+  const h = Math.floor(Number(row.h));
+  const l = Math.floor(Number(row.l));
+  const c = Math.floor(Number(row.c));
+  const ts = Number(row.timestamp);
+  const timePart = Number.isFinite(ts)
+    ? ` · ${new Date(ts).toLocaleString("ko-KR", {
+        month: "numeric",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      })}`
+    : "";
+  el.hidden = false;
+  el.textContent = `시작: ${o.toLocaleString("ko-KR")}  고가: ${h.toLocaleString("ko-KR")}  저가: ${l.toLocaleString("ko-KR")}  종가: ${c.toLocaleString("ko-KR")}${timePart}`;
+}
+
+function strokeDetailMaSeries(ctx, yPriceFn, maArr, startIdx, endIdx, xAt, color) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  let pen = false;
+  for (let i = startIdx; i < endIdx; i += 1) {
+    const v = maArr[i];
+    if (v == null || !Number.isFinite(v)) {
+      pen = false;
+      continue;
+    }
+    const x = xAt(i);
+    const y = yPriceFn(v);
+    if (!pen) {
+      ctx.moveTo(x, y);
+      pen = true;
+    } else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+function paintDetailChartCanvas(bundle) {
+  const canvasM = bundle.canvasMain;
+  const canvasV = bundle.canvasVol;
+  const canvasA = bundle.canvasAxis;
+  if (!canvasM || !canvasV || !canvasA) return;
+
+  const cssW = bundle.cssW;
+  const mainH = bundle.mainH;
+  const volH = bundle.volH;
+  const axisH = bundle.axisH;
+  resizeDetailCanvas(canvasM, cssW, mainH);
+  resizeDetailCanvas(canvasV, cssW, volH);
+  resizeDetailCanvas(canvasA, cssW, axisH);
+
+  const ctxM = canvasM.getContext("2d");
+  const ctxV = canvasV.getContext("2d");
+  const ctxA = canvasA.getContext("2d");
+  if (!ctxM || !ctxV || !ctxA) return;
+
+  ctxM.clearRect(0, 0, cssW, mainH);
+  ctxV.clearRect(0, 0, cssW, volH);
+  ctxA.clearRect(0, 0, cssW, axisH);
+
+  const { rows, stockId, plotLeft, plotTop, plotBottom, plotInnerW } = bundle;
+  if (!rows.length) return;
+  applyDetailChartViewport(bundle);
+  const { startIdx, endIdx, step, candleW } = bundle;
+  const n = rows.length;
+
+  const visRows = rows.slice(startIdx, endIdx);
+  const avgCost = getAvgCostForStock(stockId);
+  let yb = computeYBoundsForSvgRows(
+    visRows.length ? visRows : rows,
+    stockId,
+    avgCost
+  );
+  if (delistedStocks[stockId]) yb = { min: 0, max: 100 };
+  if (!Number.isFinite(Number(yb.min)) || !Number.isFinite(Number(yb.max))) {
+    yb = { min: 0, max: 100 };
+  }
+
+  const lo = Number(yb.min);
+  const hi = Number(yb.max);
+  const spanY = Math.max(1, hi - lo);
+  const plotH = Math.max(1, plotBottom - plotTop);
+
+  const yPrice = (price) => {
+    const p = Number(price);
+    const tNorm = (Number.isFinite(p) ? p : lo) - lo;
+    const tt = tNorm / spanY;
+    let y = plotTop + (1 - tt) * plotH;
+    if (!Number.isFinite(y)) y = plotBottom;
+    return Math.max(plotTop, Math.min(plotBottom, y));
+  };
+
+  const xAt = (i) => detailChartXCandleCenter(i, bundle);
+
+  for (let g = 0; g <= 4; g += 1) {
+    const yy = plotTop + (plotH * g) / 4;
+    ctxM.strokeStyle = DETAIL_CANVAS.grid;
+    ctxM.lineWidth = 1;
+    ctxM.beginPath();
+    ctxM.moveTo(plotLeft, yy);
+    ctxM.lineTo(plotLeft + plotInnerW, yy);
+    ctxM.stroke();
+    const pv = yb.max - ((yb.max - yb.min) * g) / 4;
+    const pvTxt = Number.isFinite(pv) ? Math.floor(pv).toLocaleString("ko-KR") : "—";
+    ctxM.fillStyle = DETAIL_CANVAS.axis;
+    ctxM.font = "10px system-ui, sans-serif";
+    ctxM.textAlign = "left";
+    ctxM.fillText(pvTxt, plotLeft + plotInnerW + 6, yy + 3);
+  }
+
+  const candleObjs = rows.map((r) => ({ close: Number(r.c) || 0 }));
+  const ma5 = detailChartType === "candle" ? calcMA(candleObjs, 5) : [];
+  const ma20 = detailChartType === "candle" ? calcMA(candleObjs, 20) : [];
+
+  if (detailChartType === "line") {
+    ctxM.strokeStyle =
+      endIdx > startIdx &&
+      Number(rows[endIdx - 1].c) >= Number(rows[startIdx].c)
+        ? DETAIL_CANVAS.up
+        : DETAIL_CANVAS.down;
+    ctxM.lineWidth = 2;
+    ctxM.beginPath();
+    let moved = false;
+    for (let i = startIdx; i < endIdx; i += 1) {
+      const c = Number(rows[i].c);
+      if (!Number.isFinite(c) || c <= 0) continue;
+      const x = xAt(i);
+      const y = yPrice(c);
+      if (!moved) {
+        ctxM.moveTo(x, y);
+        moved = true;
+      } else ctxM.lineTo(x, y);
+    }
+    ctxM.stroke();
+  } else {
+    for (let i = startIdx; i < endIdx; i += 1) {
+      const r = rows[i];
+      const o = Number(r.o);
+      const h = Number(r.h);
+      const l = Number(r.l);
+      const c = Number(r.c);
+      if (![o, h, l, c].every((v) => Number.isFinite(v))) continue;
+      const cx = xAt(i);
+      const up = c >= o;
+      const col = up ? DETAIL_CANVAS.up : DETAIL_CANVAS.down;
+      ctxM.strokeStyle = col;
+      ctxM.lineWidth = 1.2;
+      ctxM.beginPath();
+      ctxM.moveTo(cx, yPrice(h));
+      ctxM.lineTo(cx, yPrice(l));
+      ctxM.stroke();
+      const yTop = yPrice(Math.max(o, c));
+      const yBot = yPrice(Math.min(o, c));
+      const bh = Math.max(1, Math.abs(yBot - yTop));
+      ctxM.fillStyle = col;
+      ctxM.fillRect(cx - candleW / 2, Math.min(yTop, yBot), candleW, bh);
+    }
+  }
+
+  if (detailChartType === "candle") {
+    strokeDetailMaSeries(ctxM, yPrice, ma5, startIdx, endIdx, xAt, DETAIL_CANVAS.ma5);
+    strokeDetailMaSeries(ctxM, yPrice, ma20, startIdx, endIdx, xAt, DETAIL_CANVAS.ma20);
+  }
+
+  const crossIdx = detailChartInteraction.crossIdx;
+  if (
+    crossIdx != null &&
+    crossIdx >= 0 &&
+    crossIdx < n &&
+    bundle.crossInPlot
+  ) {
+    const cx = xAt(crossIdx);
+    const r = rows[crossIdx];
+    const cc = Number(r.c);
+    if (Number.isFinite(cc) && Number.isFinite(cx)) {
+      const cy = yPrice(cc);
+      ctxM.strokeStyle = DETAIL_CANVAS.cross;
+      ctxM.lineWidth = 1;
+      ctxM.beginPath();
+      ctxM.moveTo(cx, plotTop);
+      ctxM.lineTo(cx, plotBottom);
+      ctxM.moveTo(plotLeft, cy);
+      ctxM.lineTo(plotLeft + plotInnerW, cy);
+      ctxM.stroke();
+    }
+  }
+
+  const volPadT = 4;
+  const volPlotH = Math.max(8, volH - volPadT - 4);
+  const volBottom = volH - 4;
+  let vmax = 1;
+  for (let i = startIdx; i < endIdx; i += 1) {
+    vmax = Math.max(vmax, Number(rows[i].v) || 0);
+  }
+  for (let i = startIdx; i < endIdx; i += 1) {
+    const r = rows[i];
+    const v = Number(r.v) || 0;
+    const cx = xAt(i);
+    const bh = Math.max(2, (v / vmax) * volPlotH);
+    const up = Number(r.c) >= Number(r.o);
+    ctxV.fillStyle = up ? DETAIL_CANVAS.volUp : DETAIL_CANVAS.volDown;
+    ctxV.fillRect(cx - candleW / 2, volBottom - bh, candleW, bh);
+  }
+
+  if (
+    crossIdx != null &&
+    crossIdx >= 0 &&
+    crossIdx < n &&
+    bundle.crossInPlot
+  ) {
+    const cx = xAt(crossIdx);
+    if (Number.isFinite(cx)) {
+      ctxV.strokeStyle = DETAIL_CANVAS.cross;
+      ctxV.lineWidth = 1;
+      ctxV.beginPath();
+      ctxV.moveTo(cx, 0);
+      ctxV.lineTo(cx, volH);
+      ctxV.stroke();
+    }
+  }
+
+  ctxA.fillStyle = DETAIL_CANVAS.axis;
+  ctxA.font = "9px system-ui, sans-serif";
+  let lastLabelX = -Infinity;
+  const xAxisY = axisH - 4;
+  for (let i = startIdx; i < endIdx; i += 1) {
+    const cx = plotLeft + (i - startIdx) * step + step / 2;
+    if (cx - lastLabelX < DETAIL_X_LABEL_MIN_GAP) continue;
+    const ts = Number(rows[i].timestamp);
+    if (!Number.isFinite(ts)) continue;
+    const d = new Date(ts);
+    const prev = i > 0 ? rows[i - 1] : null;
+    const prevTs = prev ? Number(prev.timestamp) : NaN;
+    const isNewDay =
+      i === startIdx ||
+      !Number.isFinite(prevTs) ||
+      new Date(prevTs).getDate() !== d.getDate();
+    const label = isNewDay
+      ? `${d.getMonth() + 1}/${String(d.getDate()).padStart(2, "0")}`
+      : `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    const hi = crossIdx === i;
+    ctxA.fillStyle = hi ? "rgba(255,255,255,0.95)" : DETAIL_CANVAS.axis;
+    ctxA.textAlign = "center";
+    ctxA.fillText(label, cx, xAxisY);
+    lastLabelX = cx;
+  }
+  ctxA.textAlign = "left";
+}
+
+function buildDetailChartBundle(stockId, rows, opts) {
+  const preserveScroll = opts.preserveScroll === true;
+  const stack = document.getElementById("detailChartCanvasStack");
+  const canvasMain = document.getElementById("detailChartCanvasMain");
+  const canvasVol = document.getElementById("detailChartCanvasVol");
+  const canvasAxis = document.getElementById("detailChartCanvasAxis");
+  if (!stack || !canvasMain || !canvasVol || !canvasAxis) return null;
+
+  const prevStock = detailChartLiveBundle && detailChartLiveBundle.stockId;
+  const prevRange = detailChartLiveBundle && detailChartLiveBundle.rangeKey;
+  if (
+    !preserveScroll ||
+    prevStock !== stockId ||
+    prevRange !== (detailChartRange || "d1")
+  ) {
+    stopDetailChartInertia();
+    detailChartInteraction.viewOffset = 0;
+    detailChartInteraction.crossIdx = null;
+    detailChartInteraction.velocity = 0;
+    updateDetailChartOhlcHud(null);
+  }
+
+  const cssW = Math.max(1, stack.getBoundingClientRect().width || stack.clientWidth || 1);
+  const mainH = Math.max(1, canvasMain.getBoundingClientRect().height || 1);
+  const volH = Math.max(1, canvasVol.getBoundingClientRect().height || 1);
+  const axisH = Math.max(1, canvasAxis.getBoundingClientRect().height || 1);
+
+  const axisW = 52;
+  const plotLeft = 8;
+  const plotInnerW = Math.max(40, cssW - plotLeft - axisW - 4);
+  const plotTop = 10;
+  const plotBottom = mainH - 10;
+
+  return {
+    stockId,
+    rangeKey: detailChartRange || "d1",
+    rows,
+    canvasMain,
+    canvasVol,
+    canvasAxis,
+    cssW,
+    mainH,
+    volH,
+    axisH,
+    plotLeft,
+    plotTop,
+    plotBottom,
+    plotInnerW,
+    crossInPlot: false,
+  };
+}
+
+function destroyDetailCharts() {
+  stopDetailChartInertia();
+  detailChartLiveBundle = null;
+  detailChartInteraction.crossIdx = null;
+  detailChartInteraction.viewOffset = 0;
+  detailChartInteraction.velocity = 0;
+  const m = document.getElementById("detailChartCanvasMain");
+  const v = document.getElementById("detailChartCanvasVol");
+  const a = document.getElementById("detailChartCanvasAxis");
+  if (m && m.getContext) {
+    const ctx = m.getContext("2d");
+    if (ctx) ctx.clearRect(0, 0, m.width, m.height);
+  }
+  if (v && v.getContext) {
+    const ctx = v.getContext("2d");
+    if (ctx) ctx.clearRect(0, 0, v.width, v.height);
+  }
+  if (a && a.getContext) {
+    const ctx = a.getContext("2d");
+    if (ctx) ctx.clearRect(0, 0, a.width, a.height);
+  }
+  updateDetailChartOhlcHud(null);
+}
+
+function bindDetailChartScrollSyncOnce() {
+  return;
+}
+
+function bindDetailChartDragPanOnce() {
+  const stack = document.getElementById("detailChartCanvasStack");
+  const main = document.getElementById("detailChartCanvasMain");
+  if (!stack || !main || stack.dataset.dragPanBound === "1") return;
+  stack.dataset.dragPanBound = "1";
+
+  const clampOff = () => {
+    const maxO = detailChartInteraction.maxOffset;
+    let v = detailChartInteraction.viewOffset;
+    v = Math.max(0, Math.min(maxO, v));
+    detailChartInteraction.viewOffset = v;
+  };
+
+  const applyInertia = () => {
+    stopDetailChartInertia();
+    const step = () => {
+      if (Math.abs(detailChartInteraction.velocity) < 0.1) {
+        detailChartInteraction.inertiaRaf = 0;
+        detailChartInteraction.velocity = 0;
+        return;
+      }
+      detailChartInteraction.viewOffset +=
+        detailChartInteraction.velocity / DETAIL_STEP;
+      clampOff();
+      detailChartInteraction.velocity *= 0.92;
+      if (
+        detailChartInteraction.viewOffset <= 0 ||
+        detailChartInteraction.viewOffset >= detailChartInteraction.maxOffset
+      ) {
+        detailChartInteraction.inertiaRaf = 0;
+        detailChartInteraction.velocity = 0;
+        if (detailChartLiveBundle) paintDetailChartCanvas(detailChartLiveBundle);
+        return;
+      }
+      if (detailChartLiveBundle) paintDetailChartCanvas(detailChartLiveBundle);
+      detailChartInteraction.inertiaRaf = requestAnimationFrame(step);
+    };
+    detailChartInteraction.inertiaRaf = requestAnimationFrame(step);
+  };
+
+  const onDown = (clientX) => {
+    stopDetailChartInertia();
+    detailChartInteraction.pointerDown = true;
+    detailChartInteraction.dragging = true;
+    detailChartInteraction.startClientX = clientX;
+    detailChartInteraction.startViewOffset = detailChartInteraction.viewOffset;
+    detailChartInteraction.lastClientX = clientX;
+    detailChartInteraction.lastMoveTs = performance.now();
+    detailChartInteraction.velocity = 0;
+    stack.classList.add("is-dragging");
+  };
+
+  const onMove = (clientX, dragging) => {
+    if (!dragging) return;
+    const now = performance.now();
+    const dx = clientX - detailChartInteraction.startClientX;
+    const next = detailChartInteraction.startViewOffset + dx / DETAIL_STEP;
+    detailChartInteraction.viewOffset = Math.max(
+      0,
+      Math.min(detailChartInteraction.maxOffset, next)
+    );
+    const dt = Math.max(1, now - detailChartInteraction.lastMoveTs);
+    const inst = ((clientX - detailChartInteraction.lastClientX) / dt) * 16;
+    detailChartInteraction.velocity = inst;
+    detailChartInteraction.lastClientX = clientX;
+    detailChartInteraction.lastMoveTs = now;
+    if (detailChartLiveBundle) paintDetailChartCanvas(detailChartLiveBundle);
+  };
+
+  const onUp = () => {
+    if (!detailChartInteraction.dragging) return;
+    detailChartInteraction.dragging = false;
+    detailChartInteraction.pointerDown = false;
+    stack.classList.remove("is-dragging");
+    applyInertia();
+  };
+
+  stack.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    onDown(e.clientX);
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    onMove(e.clientX, detailChartInteraction.dragging);
+  });
+  window.addEventListener("mouseup", onUp);
+
+  stack.addEventListener(
+    "touchstart",
+    (e) => {
+      if (e.touches.length !== 1) return;
+      onDown(e.touches[0].clientX);
+    },
+    { passive: true }
+  );
+  window.addEventListener(
+    "touchmove",
+    (e) => {
+      if (!detailChartInteraction.dragging || e.touches.length !== 1) return;
+      onMove(e.touches[0].clientX, true);
+    },
+    { passive: true }
+  );
+  window.addEventListener("touchend", onUp);
+
+  stack.addEventListener("mouseleave", () => {
+    if (detailChartInteraction.dragging) onUp();
+  });
+
+  main.addEventListener("mousemove", (e) => {
+    if (!detailChartLiveBundle) return;
+    if (detailChartInteraction.dragging) return;
+    const idx = detailChartIndexFromClientX(e.clientX, main, detailChartLiveBundle);
+    const rect = main.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    const inPlot =
+      idx != null &&
+      y >= detailChartLiveBundle.plotTop &&
+      y <= detailChartLiveBundle.plotBottom;
+    detailChartLiveBundle.crossInPlot = inPlot;
+    detailChartInteraction.crossIdx = inPlot ? idx : null;
+    if (inPlot && idx != null) updateDetailChartOhlcHud(detailChartLiveBundle.rows[idx]);
+    else updateDetailChartOhlcHud(null);
+    paintDetailChartCanvas(detailChartLiveBundle);
+  });
+
+  main.addEventListener("mouseleave", () => {
+    if (!detailChartLiveBundle) return;
+    detailChartInteraction.crossIdx = null;
+    detailChartLiveBundle.crossInPlot = false;
+    updateDetailChartOhlcHud(null);
+    paintDetailChartCanvas(detailChartLiveBundle);
+  });
+
+  main.addEventListener(
+    "touchmove",
+    (e) => {
+      if (detailChartInteraction.dragging || !detailChartLiveBundle) return;
+      if (e.touches.length !== 1) return;
+      const idx = detailChartIndexFromClientX(
+        e.touches[0].clientX,
+        main,
+        detailChartLiveBundle
+      );
+      const rect = main.getBoundingClientRect();
+      const y = e.touches[0].clientY - rect.top;
+      const inPlot =
+        idx != null &&
+        y >= detailChartLiveBundle.plotTop &&
+        y <= detailChartLiveBundle.plotBottom;
+      detailChartLiveBundle.crossInPlot = inPlot;
+      detailChartInteraction.crossIdx = inPlot ? idx : null;
+      if (inPlot && idx != null) updateDetailChartOhlcHud(detailChartLiveBundle.rows[idx]);
+      else updateDetailChartOhlcHud(null);
+      paintDetailChartCanvas(detailChartLiveBundle);
+    },
+    { passive: true }
+  );
+}
+
+function setDetailChartCanvasPlaceholder(message) {
+  const stack = document.getElementById("detailChartCanvasStack");
+  const canvasMain = document.getElementById("detailChartCanvasMain");
+  const canvasVol = document.getElementById("detailChartCanvasVol");
+  const canvasAxis = document.getElementById("detailChartCanvasAxis");
+  if (!stack || !canvasMain || !canvasVol || !canvasAxis) return;
+  const cssW = Math.max(1, stack.clientWidth || 1);
+  const mainH = Math.max(1, canvasMain.getBoundingClientRect().height || 158);
+  const volH = Math.max(1, canvasVol.getBoundingClientRect().height || 52);
+  const axisH = Math.max(1, canvasAxis.getBoundingClientRect().height || 22);
+  resizeDetailCanvas(canvasMain, cssW, mainH);
+  resizeDetailCanvas(canvasVol, cssW, volH);
+  resizeDetailCanvas(canvasAxis, cssW, axisH);
+  const ctxM = canvasMain.getContext("2d");
+  const ctxV = canvasVol.getContext("2d");
+  const ctxA = canvasAxis.getContext("2d");
+  if (ctxM) {
+    ctxM.clearRect(0, 0, cssW, mainH);
+    ctxM.fillStyle = "#8b95a8";
+    ctxM.font = "12px system-ui, sans-serif";
+    ctxM.textAlign = "center";
+    ctxM.fillText(message, cssW / 2, mainH / 2);
+  }
+  if (ctxV) ctxV.clearRect(0, 0, cssW, volH);
+  if (ctxA) ctxA.clearRect(0, 0, cssW, axisH);
+}
+
+/** Detail chart entry (canvas). */
 function renderChart(stockId, opts) {
   return renderScrollDetailCharts(stockId, opts || {});
 }
 
-/**
- * 전체 시계열을 SVG에 그린 뒤, 가로 스크롤로 이동 (MTS 스와이프)
- */
 function renderScrollDetailCharts(stockId, opts = {}) {
   const preserveScroll = opts.preserveScroll === true;
-  const wrapMain = document.getElementById("detailChartScrollMain");
-  const wrapVol = document.getElementById("detailChartScrollVol");
-  const innerMain = document.getElementById("detailChartInnerMain");
-  const innerVol = document.getElementById("detailChartInnerVol");
-  const svgMain = document.getElementById("detailChartSvgMain");
-  const svgVol = document.getElementById("detailChartSvgVol");
-  if (!wrapMain || !wrapVol || !innerMain || !innerVol || !svgMain || !svgVol) return;
-
-  const viewportW = Math.max(1, wrapMain.clientWidth || 1);
+  const logChartRange = opts.logChartRange === true;
   detailChartView.stockId = stockId;
   detailChartView.chartRange = detailChartRange;
   detailChartView.chartType = detailChartType;
 
-  let scrollRatio = 1;
-  if (preserveScroll && wrapMain.scrollWidth > wrapMain.clientWidth) {
-    const maxScroll = wrapMain.scrollWidth - wrapMain.clientWidth;
-    scrollRatio = maxScroll > 0 ? wrapMain.scrollLeft / maxScroll : 1;
-  }
-
   let rows = [];
   try {
-    rows = buildOrderedDetailChartRows(stockId);
+    rows = buildDetailChartRowsFiltered(stockId);
   } catch (e) {
-    console.warn("buildOrderedDetailChartRows", e);
+    console.warn("buildDetailChartRowsFiltered", e);
     rows = [];
   }
 
-  if (!rows.length) {
-    setDetailChartPlaceholder(
-      svgMain,
-      svgVol,
-      innerMain,
-      innerVol,
-      viewportW,
-      "데이터 로딩 중…"
+  if (logChartRange) {
+    console.log(
+      `[chart] range=${detailChartRange || "d1"}, filtered=${rows.length}개`
     );
+  }
+
+  if (!rows.length) {
+    setDetailChartCanvasPlaceholder("\ub370\uc774\ud130 \ub85c\ub529 \uc911\u2026");
     return;
   }
 
   try {
-    const n = rows.length;
-    const tMinOrd = 0;
-    const tMaxOrd = n - 1;
-    const spanOrd = Math.max(1, tMaxOrd - tMinOrd);
-    const rangeKey = detailChartRange || "all";
-    const slotPx =
-      rangeKey === "d1"
-        ? 12
-        : rangeKey === "w1"
-          ? 10
-          : rangeKey === "m1"
-            ? 8
-            : 7;
-    const contentWidth = Math.max(
-      viewportW,
-      Math.ceil(n * slotPx + DETAIL_SVG_PAD_L + DETAIL_SVG_PAD_R + 12)
-    );
-    const yRows = rows;
-    const avgCost = getAvgCostForStock(stockId);
-    let yb = computeYBoundsForSvgRows(yRows, stockId, avgCost);
-    if (delistedStocks[stockId]) {
-      yb = { min: 0, max: 100 };
-    }
-    if (
-      !Number.isFinite(Number(yb.min)) ||
-      !Number.isFinite(Number(yb.max))
-    ) {
-      yb = { min: 0, max: 100 };
-    }
-
-    const plotLeft = DETAIL_SVG_PAD_L;
-    const plotTop = DETAIL_SVG_PAD_T;
-    const plotRight = contentWidth - DETAIL_SVG_PAD_R;
-    const plotBottom = DETAIL_SVG_MAIN_H - DETAIL_SVG_PAD_B;
-    const plotW = Math.max(1, plotRight - plotLeft);
-    const plotH = Math.max(1, plotBottom - plotTop);
-
-    const candleW = Math.max(2, Math.min(10, Math.floor(slotPx * 0.72)));
-    const xInset = Math.max(4, candleW * 0.7);
-    function xAt(ord) {
-      const o = Number(ord);
-      if (!Number.isFinite(o)) return plotLeft;
-      const packedX = plotLeft + xInset + o * slotPx;
-      return Math.max(plotLeft + xInset, Math.min(plotRight - xInset, packedX));
-    }
-    function yPrice(price) {
-      const yMin = Number(yb.min);
-      const yMax = Number(yb.max);
-      const lo = Number.isFinite(yMin) ? yMin : 0;
-      const hi = Number.isFinite(yMax) ? yMax : Math.max(1, lo + 1);
-      const span = Math.max(1, hi - lo);
-      const p = Number(price);
-      const tNorm = (Number.isFinite(p) ? p : lo) - lo;
-      const tt = tNorm / span;
-      let y = plotTop + (1 - tt) * plotH;
-      if (!Number.isFinite(y)) y = plotBottom;
-      return Math.max(plotTop, Math.min(plotBottom, y));
-    }
-
-    const clipMainId = "stockDetailClipMain";
-    const clipInner = [];
-    for (let i = 0; i <= 4; i += 1) {
-      const yy = plotTop + (plotH * i) / 4;
-      clipInner.push(
-        `<line x1="${plotLeft}" y1="${yy}" x2="${plotRight}" y2="${yy}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>`
-      );
-    }
-
-    if (detailChartType === "line") {
-      const pts = rows
-        .map((r) => {
-          const c = Number(r.c);
-          if (!Number.isFinite(c) || c <= 0) return null;
-          return `${xAt(r.ord)},${yPrice(c)}`;
-        })
-        .filter(Boolean);
-      const lineColor =
-        rows.length >= 2 &&
-        Number(rows[rows.length - 1].c) >= Number(rows[0].c)
-          ? CANDLE_UP
-          : CANDLE_DOWN;
-      if (pts.length === 1) {
-        const [px, py] = pts[0].split(",").map(Number);
-        if (Number.isFinite(px) && Number.isFinite(py)) {
-          clipInner.push(
-            `<circle cx="${px}" cy="${py}" r="3" fill="${lineColor}" stroke="${lineColor}" stroke-width="1"/>`
-          );
-        }
-      } else if (pts.length > 1) {
-        clipInner.push(
-          `<polyline fill="none" stroke="${lineColor}" stroke-width="2" points="${pts.join(" ")}" />`
-        );
-      }
-    } else {
-      rows.forEach((r) => {
-        const o = Number(r.o);
-        const h = Number(r.h);
-        const l = Number(r.l);
-        const c = Number(r.c);
-        if (![o, h, l, c].every((v) => Number.isFinite(v))) return;
-        const cx = xAt(r.ord);
-        if (!Number.isFinite(cx)) return;
-        const up = c >= o;
-        const col = up ? CANDLE_UP : CANDLE_DOWN;
-        clipInner.push(
-          `<line x1="${cx}" y1="${yPrice(h)}" x2="${cx}" y2="${yPrice(l)}" stroke="${col}" stroke-width="1.2"/>`
-        );
-        const yTop = yPrice(Math.max(o, c));
-        const yBot = yPrice(Math.min(o, c));
-        const bh = Math.max(1, Math.abs(yBot - yTop));
-        const bw = candleW;
-        clipInner.push(
-          `<rect x="${cx - bw / 2}" y="${Math.min(yTop, yBot)}" width="${bw}" height="${bh}" fill="${col}" fill-opacity="0.92" rx="1"/>`
-        );
-      });
-    }
-
-    if (avgCost != null && avgCost > 0 && !delistedStocks[stockId]) {
-      const yAvg = yPrice(avgCost);
-      clipInner.push(
-        `<line x1="${plotLeft}" y1="${yAvg}" x2="${plotRight}" y2="${yAvg}" stroke="rgba(250,204,21,0.85)" stroke-dasharray="6" stroke-width="1.2"/>`
-      );
-    }
-
-    if (delistedStocks[stockId]) {
-      const yz = yPrice(0);
-      clipInner.push(
-        `<line x1="${plotLeft}" y1="${yz}" x2="${plotRight}" y2="${yz}" stroke="rgba(99,102,241,0.85)" stroke-width="1.2"/>`
-      );
-    }
-
-    const mainParts = [];
-    mainParts.push(
-      `<defs><clipPath id="${clipMainId}"><rect x="${plotLeft}" y="${plotTop}" width="${plotW}" height="${plotH}" /></clipPath></defs>`
-    );
-    mainParts.push(`<g clip-path="url(#${clipMainId})">${clipInner.join("")}</g>`);
-
-    for (let i = 0; i <= 4; i += 1) {
-      const yy = plotTop + (plotH * i) / 4;
-      const pv = yb.max - ((yb.max - yb.min) * i) / 4;
-      const pvTxt = Number.isFinite(pv)
-        ? Math.floor(pv).toLocaleString("ko-KR")
-        : "—";
-      mainParts.push(
-        `<text x="${plotLeft}" y="${yy - 2}" fill="#8b95a8" font-size="9">${pvTxt}</text>`
-      );
-    }
-
-    if (avgCost != null && avgCost > 0 && !delistedStocks[stockId]) {
-      const yAvg = yPrice(avgCost);
-      mainParts.push(
-        `<text x="${plotLeft}" y="${Math.max(12, yAvg - 4)}" fill="#facc15" font-size="10">평단</text>`
-      );
-    }
-
-    if (delistedStocks[stockId]) {
-      const yz = yPrice(0);
-      mainParts.push(
-        `<text x="${plotLeft}" y="${Math.max(12, yz - 4)}" fill="#dbeafe" font-size="10">상장폐지</text>`
-      );
-    }
-
-    for (let k = 0; k <= 4; k += 1) {
-      const idx = n <= 1 ? 0 : Math.round(((n - 1) * k) / 4);
-      const rAt = rows[idx];
-      const lx = Math.max(plotLeft + 2, Math.min(plotRight - 2, xAt(idx)));
-      const lab = detailChartAxisLabelFromRow(rAt);
-      const anchor = k === 0 ? "start" : k === 4 ? "end" : "middle";
-      mainParts.push(
-        `<text x="${lx}" y="${DETAIL_SVG_MAIN_H - 6}" text-anchor="${anchor}" fill="#8b95a8" font-size="9">${escapeHtml(lab)}</text>`
-      );
-    }
-
-    svgMain.setAttribute("viewBox", `0 0 ${contentWidth} ${DETAIL_SVG_MAIN_H}`);
-    svgMain.setAttribute("width", contentWidth);
-    svgMain.innerHTML = mainParts.join("");
-
-    const vmax = Math.max(
-      1,
-      rows.reduce((m, r) => Math.max(m, Number(r.v) || 0), 0)
-    );
-    const volPlotTop = DETAIL_SVG_PAD_T;
-    const volPlotBottom = DETAIL_SVG_VOL_H - 8;
-    const volPlotH = volPlotBottom - volPlotTop;
-    const clipVolId = "stockDetailClipVol";
-    const volBars = [];
-    rows.forEach((r) => {
-      const v = Number(r.v) || 0;
-      const h = Math.max(2, (v / vmax) * volPlotH);
-      const cx = xAt(r.ord);
-      const bw = candleW;
-      const up = Number(r.c) >= Number(r.o);
-      const col = up ? CANDLE_UP : CANDLE_DOWN;
-      const y0 = volPlotBottom - h;
-      volBars.push(
-        `<rect x="${cx - bw / 2}" y="${y0}" width="${bw}" height="${h}" fill="${col}" fill-opacity="0.75"/>`
-      );
-    });
-    const volSvg = [
-      `<defs><clipPath id="${clipVolId}"><rect x="${plotLeft}" y="${volPlotTop}" width="${plotW}" height="${volPlotH}" /></clipPath></defs>`,
-      `<g clip-path="url(#${clipVolId})">${volBars.join("")}</g>`,
-    ];
-    svgVol.setAttribute("viewBox", `0 0 ${contentWidth} ${DETAIL_SVG_VOL_H}`);
-    svgVol.setAttribute("width", contentWidth);
-    svgVol.innerHTML = volSvg.join("");
-
-    innerMain.style.width = `${contentWidth}px`;
-    innerMain.style.minWidth = `${contentWidth}px`;
-    innerVol.style.width = `${contentWidth}px`;
-    innerVol.style.minWidth = `${contentWidth}px`;
-
-    requestAnimationFrame(() => {
-      const w = document.getElementById("detailChartScrollMain");
-      const wv = document.getElementById("detailChartScrollVol");
-      if (!w || !wv) return;
-      const maxScroll = Math.max(0, w.scrollWidth - w.clientWidth);
-      w.scrollLeft = maxScroll;
-      wv.scrollLeft = maxScroll;
-      // 렌더 타이밍 이슈 방지: 다음 틱에도 최신(우측 끝) 정렬 재보장
-      setTimeout(() => {
-        const mw = document.getElementById("detailChartScrollMain");
-        const mv = document.getElementById("detailChartScrollVol");
-        if (!mw || !mv) return;
-        const mmax = Math.max(0, mw.scrollWidth - mw.clientWidth);
-        mw.scrollLeft = mmax;
-        mv.scrollLeft = mmax;
-      }, 0);
-    });
-
-    bindDetailChartScrollSyncOnce();
+    const bundle = buildDetailChartBundle(stockId, rows, { preserveScroll });
+    if (!bundle) return;
+    detailChartLiveBundle = bundle;
+    paintDetailChartCanvas(bundle);
     bindDetailChartDragPanOnce();
   } catch (e) {
     console.warn("renderScrollDetailCharts", e);
-    setDetailChartPlaceholder(
-      svgMain,
-      svgVol,
-      innerMain,
-      innerVol,
-      viewportW,
-      "데이터 로딩 중…"
-    );
+    setDetailChartCanvasPlaceholder("\ub370\uc774\ud130 \ub85c\ub529 \uc911\u2026");
   }
 }
 
-function initDetailCharts(stockId) {
+function initDetailCharts(stockId, opts) {
   const s = getStockById(stockId);
   if (!s) return;
   destroyDetailCharts();
-  renderScrollDetailCharts(stockId, { preserveScroll: false });
+  renderScrollDetailCharts(stockId, {
+    preserveScroll: false,
+    logChartRange: opts && opts.logChartRange === true,
+  });
 }
 
 const LS_STOCK_COMMUNITY = "stockLifeCommunityV1";
@@ -6427,8 +6652,8 @@ function openStockDetail(stockId) {
   if (tickEl) tickEl.textContent = s.id;
   if (descEl) descEl.textContent = s.desc || "";
 
-  detailChartRange = "all";
-  detailChartView.chartRange = "all";
+  detailChartRange = "d1";
+  detailChartView.chartRange = "d1";
   syncDetailChartRangeButtons();
   syncDetailChartTypeButtons();
   detailLastShownPrice = null;
