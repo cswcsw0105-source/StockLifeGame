@@ -883,10 +883,11 @@ const DETAIL_CHART_BUCKET_MINUTES_BY_RANGE = {
 };
 const GAME_DAY_MS = 510_000; // 게임 1일(08:00~16:30) = 현실 510초
 /** 상세 차트 탭별 표시 창(ms). all은 무한대(전체) */
+const GAME_DAY_REAL_MS = 510_000;
 const DETAIL_CHART_RANGE_MS = {
-  d1: 510_000,
-  w1: 510_000 * 7,
-  m1: 510_000 * 30,
+  d1: GAME_DAY_REAL_MS * 1,
+  w1: GAME_DAY_REAL_MS * 7,
+  m1: GAME_DAY_REAL_MS * 30,
   all: Infinity,
 };
 /** Sealed candle real-time span (ms) */
@@ -906,27 +907,28 @@ const DETAIL_CANVAS = {
 
 let detailChartLiveBundle = null;
 
+/** Detail canvas: X by bar index only (no swipe). */
 const detailChartInteraction = {
-  viewOffset: 0,
-  velocity: 0,
-  inertiaRaf: 0,
-  dragging: false,
-  pointerDown: false,
-  startClientX: 0,
-  startViewOffset: 0,
-  lastClientX: 0,
-  lastMoveTs: 0,
-  slotPx: 10,
-  maxOffset: 0,
   crossIdx: null,
 };
+
+/** Bars per screen: day 51, week 255, month 1020; all = null. */
+const DETAIL_CHART_PAGE_SIZE = Object.freeze({
+  d1: 51,
+  w1: 255,
+  m1: 1020,
+  all: null,
+});
+
+/** Page into past for d1/w1/m1 (0 = newest). Unused for all. */
+let detailChartPageIndex = 0;
 
 const DETAIL_CHART_CANDLES_D1 = Math.max(
   1,
   Math.floor((MARKET_CLOSE_MIN - PREMARKET_START_MIN) / CANDLE_GAME_MINUTES)
 ); // 51
 const DETAIL_CHART_CANDLES_W1 = DETAIL_CHART_CANDLES_D1 * 5; // 255
-const DETAIL_CHART_CANDLES_M1 = 1000;
+const DETAIL_CHART_CANDLES_M1 = 1020;
 
 const DETAIL_SVG_MAIN_H = 210;
 const DETAIL_SVG_VOL_H = 88;
@@ -2394,7 +2396,7 @@ async function bootstrapSupabase() {
 const NEWS_CHAINS = {
   JBD: [
     { headline: "디자인 시안 100번째 수정 중 수석 디자이너 오열... '굴림체는 안 된다고 했잖아요'", impacts: { JBD: 0.007 }, bias: { JBD: 0.005 }, volFactor: 1.26 },
-    { headline: "신규 로고에 무지개색 파스텔 톤 적용... 네티즌들 '눈뽕 테러' VS '힙하다' 갑론을박", impacts: { JBD: -0.006 }, bias: { JBD: -0.004 }, volFactor: 1.24 },
+    "|�들:",
     { headline: "대표, 핀터레스트 켜놓고 영감 찾는 척하다 낮잠 자는 모습 포착돼", impacts: { JBD: 0.008 }, bias: { JBD: 0.006 }, volFactor: 1.28 },
     { headline: "디자인 팀 막내, PPT에 보노보노 넣었다가 해외 바이어에게 '아방가르드하다'며 극찬받아", impacts: { JBD: -0.007 }, bias: { JBD: -0.005 }, volFactor: 1.22 },
     { headline: "사옥 외벽 페인트칠, 페인트공의 수전증으로 의도치 않은 '그라데이션 예술' 탄생", impacts: { JBD: 0.006 }, bias: { JBD: 0.004 }, volFactor: 1.25 },
@@ -2411,14 +2413,14 @@ const NEWS_CHAINS = {
   MJS: [
     { headline: "VIP 케어 서비스에 '할머니 약손' 요법 도입... 만족도 500% 폭발", impacts: { MJS: 0.01 }, bias: { MJS: 0.007 }, volFactor: 1.32 },
     { headline: "신규 플랫폼 서버 다운... 원인은 서버실에서 라면 끓여 먹다 전원 뽑음", impacts: { MJS: -0.008 }, bias: { MJS: -0.006 }, volFactor: 1.28 },
-    { headline: "호텔 조식 뷔페에 '오이 탕후루' 등장... 투숙객들 경악 속 묘한 중독성 호소", impacts: { MJS: 0.009 }, bias: { MJS: 0.006 }, volFactor: 1.25 },
+    "|�들:",
     { headline: "AI 룸서비스 로봇, 길 잃고 인근 편의점에서 소주 사오다 적발돼", impacts: { MJS: -0.007 }, bias: { MJS: -0.005 }, volFactor: 1.22 },
     { headline: "VIP 스위트룸 변기 막힘... 배관공이 실수로 숨겨진 금괴 발견해 지분 떡상 논란", impacts: { MJS: 0.011 }, bias: { MJS: 0.008 }, volFactor: 1.33 },
-    { headline: "풀빌라 예약 앱에 '유령과 합석 가능' 옵션 버그 발생... 공포 마니아들 성지로 등극", impacts: { MJS: -0.009 }, bias: { MJS: -0.006 }, volFactor: 1.27 },
+    "|�들:",
   ],
   BSL: [
     { headline: "연구원 실수로 '민트초코맛 떡볶이' 소스 개발... 품절 대란 조짐", impacts: { BSL: 0.008 }, bias: { BSL: 0.005 }, volFactor: 1.23 },
-    { headline: "탈모 치료제 연구 중 실수로 연구실 화분 식물들만 무성하게 자라나...", impacts: { BSL: -0.007 }, bias: { BSL: -0.004 }, volFactor: 1.21 },
+    "|�들:",
     { headline: "랩실 냉장고에서 누군가 남겨둔 마카롱 도난 사건 발생, 팀워크 붕괴 우려", impacts: { BSL: 0.009 }, bias: { BSL: 0.006 }, volFactor: 1.26 },
     { headline: "숙취해소제 임상실험 중 부작용으로 '노래방 탬버린 1시간 무한 체력' 효과 발견", impacts: { BSL: -0.008 }, bias: { BSL: -0.005 }, volFactor: 1.29 },
     { headline: "랩실 탈출한 실험용 쥐, 인근 PC방에서 마우스 갉아먹다 현행범 체포", impacts: { BSL: 0.007 }, bias: { BSL: 0.005 }, volFactor: 1.24 },
@@ -2427,10 +2429,10 @@ const NEWS_CHAINS = {
   SYG: [
     { headline: "공장장, 기어 윤활유 대신 실수로 참기름 발라... '고소한 냄새에 작업 능률 떡상'", impacts: { SYG: 0.009 }, bias: { SYG: 0.007 }, volFactor: 1.28 },
     { headline: "신형 정밀 모듈에서 알 수 없는 삐걱 소리 발생... 알고 보니 기계에 낀 귀뚜라미 탓", impacts: { SYG: -0.008 }, bias: { SYG: -0.005 }, volFactor: 1.25 },
-    { headline: "공장 컨베이어 벨트에 초고속 모터 달았더니 직원들 강제 다이어트 성공", impacts: { SYG: 0.008 }, bias: { SYG: 0.006 }, volFactor: 1.26 },
+    "|�들:",
     { headline: "부품 결함으로 톱니바퀴 역방향 회전... '시간 여행' 테마주로 편입되나?", impacts: { SYG: -0.007 }, bias: { SYG: -0.005 }, volFactor: 1.22 },
-    { headline: "사내 식당 반찬으로 나온 깍두기가 톱니바퀴 모양으로 썰려있어 직원들 광기 호소", impacts: { SYG: 0.01 }, bias: { SYG: 0.007 }, volFactor: 1.32 },
-    { headline: "최고급 쇠구슬 베어링, 구슬치기 대회 상품으로 유출되어 동네 초등학생들 싹쓸이", impacts: { SYG: -0.009 }, bias: { SYG: -0.006 }, volFactor: 1.28 },
+    "|�들:",
+    "|�들:",
   ],
   JWF: [
     { headline: "펀드매니저, 점심시간에 도지코인 풀매수했다가 대표한테 걸려 시말서 작성", impacts: { JWF: 0.006 }, bias: { JWF: 0.005 }, volFactor: 1.18 },
@@ -2449,12 +2451,12 @@ const NEWS_CHAINS = {
     { headline: "차기작으로 '투명 망토' 콘셉트 발표했으나 그냥 옷 안 입은 거 아니냐는 논란 일어", impacts: { YHL: -0.009 }, bias: { YHL: -0.006 }, volFactor: 1.31 },
   ],
   SWB: [
-    { headline: "최선웅 대표, 사무실에서 몰래 게임하다 마이크 켜져서 전 직원에게 티어(브론즈) 들통나...", impacts: { SWB: 0.007 }, bias: { SWB: 0.005 }, volFactor: 1.2 },
-    { headline: "B2B 솔루션에 실수로 '사장님 몰래 퇴근하는 버튼' 추가해 직장인들 열광", impacts: { SWB: -0.006 }, bias: { SWB: -0.004 }, volFactor: 1.22 },
+    "|�들:",
+    "|�들:",
     { headline: "최선웅 대표, 점심 메뉴 고르는 AI 개발하다 3박 4일째 짜장면 vs 짬뽕 무한 루프", impacts: { SWB: 0.008 }, bias: { SWB: 0.006 }, volFactor: 1.24 },
     { headline: "신입사원, 회식 자리에서 사장님 정수리에 소맥 제조... '강력한 MZ의 등장' 주가 요동", impacts: { SWB: -0.008 }, bias: { SWB: -0.005 }, volFactor: 1.26 },
     { headline: "B2B 메신저에 '오타 자동 완성' 기능 넣었더니 '부장님 사랑해요'가 '부장님 사퇴하세요'로 전송돼 서버 폭주", impacts: { SWB: 0.009 }, bias: { SWB: 0.006 }, volFactor: 1.28 },
-    { headline: "회사 워크샵에서 최선웅 대표 춤사위 공개... 충격받은 투자자들 단체 매도 시도", impacts: { SWB: -0.007 }, bias: { SWB: -0.005 }, volFactor: 1.25 },
+    "|�들:",
   ],
 };
 
@@ -2807,28 +2809,13 @@ function formatChartOrdinalAxisLabel(ord) {
   return formatCandleXLabel(day, periodStartMin);
 }
 
-function filterCandleRowsForChartRange(rows, range) {
-  if (!rows || rows.length === 0) return [];
-  const normalized = rows
-    .map((r) => normalizeCandleRow({ ...r }))
-    .filter((r) => isValidCandleRow(r));
-  if (normalized.length === 0) return [];
-  normalized.sort(
-    (a, b) => Number(a.gameTimeOrdinal) - Number(b.gameTimeOrdinal)
-  );
-  if (range === "all") return normalized.map((r) => ({ ...r }));
-  const winMs = DETAIL_CHART_RANGE_MS[range];
-  if (winMs === undefined || winMs === Infinity) return normalized.map((r) => ({ ...r }));
-  const now = Date.now();
-  const threshold = now - winMs;
-  return normalized
-    .filter((r) => {
-      const ts = Number(r.timestamp);
-      if (Number.isFinite(ts)) return ts >= threshold;
-      const x = Number(r.x);
-      return Number.isFinite(x) ? x >= threshold : false;
-    })
-    .map((r) => ({ ...r }));
+function getDetailChartHistoryFirstTs(stockId) {
+  const rawHist = candleHistory[stockId] || [];
+  let firstTs = Number(rawHist[0]?.timestamp);
+  if (Number.isFinite(firstTs)) return firstTs;
+  const x0 = Number(rawHist[0]?.x);
+  if (Number.isFinite(x0)) return x0;
+  return null;
 }
 
 function capDetailChartRows(rows, range) {
@@ -2856,8 +2843,14 @@ function sampleRowsForDetailChart(rows, maxPoints = DETAIL_CHART_SAMPLE_MAX_POIN
 function getFilteredCandleHistory(stockId) {
   const raw = candleHistory[stockId] || [];
   const range = detailChartRange || "all";
-  const filtered = filterCandleRowsForChartRange(raw, range);
-  return capDetailChartRows(filtered, range);
+  const normalized = raw
+    .map((r) => normalizeCandleRow({ ...r }))
+    .filter((r) => isValidCandleRow(r));
+  if (normalized.length === 0) return [];
+  normalized.sort(
+    (a, b) => Number(a.gameTimeOrdinal) - Number(b.gameTimeOrdinal)
+  );
+  return capDetailChartRows(normalized, range);
 }
 
 function isValidCandleRow(r) {
@@ -5046,20 +5039,32 @@ function bindDetailChartD1DaySwipeOnce() {
   return;
 }
 
-/** candleHistory 기반 복제 행 + RANGE_MS 필터 (원본 배열 미변경) */
+/** 정렬된 full 배열에서 range·pageIndex로 slice만 */
+function sliceDetailChartRowsForPage(fullSorted, rangeKey, pageIndex) {
+  const n = fullSorted.length;
+  if (n === 0) return [];
+  if (rangeKey === "all") return fullSorted.slice();
+  const pageSize = DETAIL_CHART_PAGE_SIZE[rangeKey];
+  if (!pageSize) return fullSorted.slice();
+  const end = Math.max(0, n - pageIndex * pageSize);
+  const start = Math.max(0, end - pageSize);
+  return fullSorted.slice(start, end);
+}
+
 function buildDetailChartRowsFiltered(stockId) {
   const fullRaw = buildFullCanvasRowsForScrollChart(stockId);
   if (!fullRaw.length) return [];
   const range = detailChartRange || "d1";
-  return filterCandleRowsForChartRange(fullRaw, range);
+  return sliceDetailChartRowsForPage(fullRaw, range, detailChartPageIndex);
 }
 
 function detailChartAxisLabelFromRow(r) {
   if (!r) return "—";
   const ts = Number(r.timestamp);
-  if (Number.isFinite(ts)) {
-    const d = new Date(ts);
-    return `${d.getMonth() + 1}/${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const anchor = detailChartLiveBundle && detailChartLiveBundle.chartFirstCandleTs;
+  if (Number.isFinite(ts) && Number.isFinite(Number(anchor))) {
+    const g = toGameTime(ts, anchor);
+    return `${g.dayLabel} ${g.time}`;
   }
   const d0 = Math.floor(Number(r.dayIndex));
   const m0 = Math.floor(Number(r.periodStartMin));
@@ -5072,6 +5077,26 @@ const DETAIL_CANDLE_GAP = 2;
 const DETAIL_STEP = DETAIL_CANDLE_W + DETAIL_CANDLE_GAP;
 const DETAIL_X_LABEL_MIN_GAP = 80;
 
+/** X: firstTs = candleHistory[stockId][0]; 1s real = 1m game; 510 game-min/day = 510s real. */
+function toGameTime(ts, firstTs) {
+  const GAME_DAY_REAL_MS = 510_000;
+  const t0 = Number(firstTs);
+  const t = Number(ts);
+  if (!Number.isFinite(t) || !Number.isFinite(t0)) {
+    return { dayIndex: 0, time: "—", dayLabel: "1일차" };
+  }
+  const elapsedRealMs = Math.max(0, t - t0);
+  const dayIndex = Math.floor(elapsedRealMs / GAME_DAY_REAL_MS);
+  const inDayGameMin = Math.floor((elapsedRealMs % GAME_DAY_REAL_MS) / 1000);
+  const gameHour = Math.floor(inDayGameMin / 60) + 8;
+  const gameMin = inDayGameMin % 60;
+  return {
+    dayIndex,
+    time: `${String(gameHour).padStart(2, "0")}:${String(gameMin).padStart(2, "0")}`,
+    dayLabel: `${dayIndex + 1}일차`,
+  };
+}
+
 function calcMA(candles, period) {
   return candles.map((_, i) => {
     if (i < period - 1) return null;
@@ -5080,44 +5105,20 @@ function calcMA(candles, period) {
   });
 }
 
+/** X: bar index 0..n-1 evenly across plotInnerW (no time gaps). */
 function applyDetailChartViewport(bundle) {
   const { rows, plotInnerW } = bundle;
   const n = rows.length;
-  const visCap = Math.max(1, Math.floor(plotInnerW / DETAIL_STEP));
+  bundle.startIdx = 0;
+  bundle.endIdx = n;
   if (n === 0) {
-    bundle.startIdx = 0;
-    bundle.endIdx = 0;
-    bundle.step = DETAIL_STEP;
+    bundle.step = 0;
     bundle.candleW = DETAIL_CANDLE_W;
-    bundle.maxOffset = 0;
-    bundle.spread = true;
-    detailChartInteraction.viewOffset = 0;
-    detailChartInteraction.maxOffset = 0;
     return;
   }
-  if (n <= visCap) {
-    detailChartInteraction.viewOffset = 0;
-    detailChartInteraction.maxOffset = 0;
-    bundle.startIdx = 0;
-    bundle.endIdx = n;
-    bundle.step = plotInnerW / n;
-    bundle.candleW = Math.max(2, Math.min(20, bundle.step - DETAIL_CANDLE_GAP));
-    bundle.maxOffset = 0;
-    bundle.spread = true;
-    return;
-  }
-  const maxOff = n - visCap;
-  let vo = Number(detailChartInteraction.viewOffset);
-  if (!Number.isFinite(vo)) vo = 0;
-  vo = Math.max(0, Math.min(maxOff, vo));
-  detailChartInteraction.viewOffset = vo;
-  detailChartInteraction.maxOffset = maxOff;
-  bundle.startIdx = Math.max(0, n - vo - visCap);
-  bundle.endIdx = n - vo;
-  bundle.step = DETAIL_STEP;
-  bundle.candleW = DETAIL_CANDLE_W;
-  bundle.maxOffset = maxOff;
-  bundle.spread = false;
+  const slot = plotInnerW / n;
+  bundle.step = slot;
+  bundle.candleW = Math.max(2, Math.min(DETAIL_CANDLE_W, slot * 0.72));
 }
 
 function detailChartXCandleCenter(i, bundle) {
@@ -5133,17 +5134,10 @@ function detailChartIndexFromClientX(clientX, canvas, bundle) {
   if (x < plotLeft || x > plotLeft + plotInnerW) return null;
   const rel = x - plotLeft;
   const fi = (rel - step / 2) / step + startIdx;
-  const idx = Math.round(fi);
-  if (idx < startIdx || idx >= endIdx || idx >= rows.length) return null;
+  let idx = Math.round(fi);
+  idx = Math.max(startIdx, Math.min(endIdx - 1, idx));
+  if (idx < 0 || idx >= rows.length) return null;
   return idx;
-}
-
-function stopDetailChartInertia() {
-  if (detailChartInteraction.inertiaRaf) {
-    cancelAnimationFrame(detailChartInteraction.inertiaRaf);
-    detailChartInteraction.inertiaRaf = 0;
-  }
-  detailChartInteraction.velocity = 0;
 }
 
 function resizeDetailCanvas(canvas, cssW, cssH) {
@@ -5170,14 +5164,12 @@ function updateDetailChartOhlcHud(row) {
   const l = Math.floor(Number(row.l));
   const c = Math.floor(Number(row.c));
   const ts = Number(row.timestamp);
-  const timePart = Number.isFinite(ts)
-    ? ` · ${new Date(ts).toLocaleString("ko-KR", {
-        month: "numeric",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-      })}`
-    : "";
+  const anchor = detailChartLiveBundle && detailChartLiveBundle.chartFirstCandleTs;
+  let timePart = "";
+  if (Number.isFinite(ts) && Number.isFinite(Number(anchor))) {
+    const g = toGameTime(ts, anchor);
+    timePart = ` · ${g.dayLabel} ${g.time}`;
+  }
   el.hidden = false;
   el.textContent = `시작: ${o.toLocaleString("ko-KR")}  고가: ${h.toLocaleString("ko-KR")}  저가: ${l.toLocaleString("ko-KR")}  종가: ${c.toLocaleString("ko-KR")}${timePart}`;
 }
@@ -5387,6 +5379,7 @@ function paintDetailChartCanvas(bundle) {
     }
   }
 
+  const firstTs = bundle.chartFirstCandleTs;
   ctxA.fillStyle = DETAIL_CANVAS.axis;
   ctxA.font = "9px system-ui, sans-serif";
   let lastLabelX = -Infinity;
@@ -5395,17 +5388,17 @@ function paintDetailChartCanvas(bundle) {
     const cx = plotLeft + (i - startIdx) * step + step / 2;
     if (cx - lastLabelX < DETAIL_X_LABEL_MIN_GAP) continue;
     const ts = Number(rows[i].timestamp);
-    if (!Number.isFinite(ts)) continue;
-    const d = new Date(ts);
-    const prev = i > 0 ? rows[i - 1] : null;
-    const prevTs = prev ? Number(prev.timestamp) : NaN;
+    const t = Number.isFinite(ts) ? ts : Number(rows[i].x);
+    if (!Number.isFinite(t)) continue;
+    const cur = toGameTime(t, firstTs);
+    const dCur = Math.floor(Number(rows[i].dayIndex));
+    const dPrev = i > 0 ? Math.floor(Number(rows[i - 1].dayIndex)) : NaN;
     const isNewDay =
-      i === startIdx ||
-      !Number.isFinite(prevTs) ||
-      new Date(prevTs).getDate() !== d.getDate();
-    const label = isNewDay
-      ? `${d.getMonth() + 1}/${String(d.getDate()).padStart(2, "0")}`
-      : `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      i === 0 ||
+      !Number.isFinite(dCur) ||
+      !Number.isFinite(dPrev) ||
+      dCur !== dPrev;
+    const label = isNewDay ? cur.dayLabel : cur.time;
     const hi = crossIdx === i;
     ctxA.fillStyle = hi ? "rgba(255,255,255,0.95)" : DETAIL_CANVAS.axis;
     ctxA.textAlign = "center";
@@ -5430,10 +5423,7 @@ function buildDetailChartBundle(stockId, rows, opts) {
     prevStock !== stockId ||
     prevRange !== (detailChartRange || "d1")
   ) {
-    stopDetailChartInertia();
-    detailChartInteraction.viewOffset = 0;
     detailChartInteraction.crossIdx = null;
-    detailChartInteraction.velocity = 0;
     updateDetailChartOhlcHud(null);
   }
 
@@ -5447,6 +5437,19 @@ function buildDetailChartBundle(stockId, rows, opts) {
   const plotInnerW = Math.max(40, cssW - plotLeft - axisW - 4);
   const plotTop = 10;
   const plotBottom = mainH - 10;
+
+  let chartFirstCandleTs = getDetailChartHistoryFirstTs(stockId);
+  if (chartFirstCandleTs == null && rows.length > 0) {
+    const t0 = Number(rows[0].timestamp);
+    if (Number.isFinite(t0)) chartFirstCandleTs = t0;
+    else {
+      const x0 = Number(rows[0].x);
+      chartFirstCandleTs = Number.isFinite(x0) ? x0 : null;
+    }
+  }
+  if (chartFirstCandleTs == null && rows.length > 0) {
+    chartFirstCandleTs = Date.now();
+  }
 
   return {
     stockId,
@@ -5463,16 +5466,14 @@ function buildDetailChartBundle(stockId, rows, opts) {
     plotTop,
     plotBottom,
     plotInnerW,
+    chartFirstCandleTs,
     crossInPlot: false,
   };
 }
 
 function destroyDetailCharts() {
-  stopDetailChartInertia();
   detailChartLiveBundle = null;
   detailChartInteraction.crossIdx = null;
-  detailChartInteraction.viewOffset = 0;
-  detailChartInteraction.velocity = 0;
   const m = document.getElementById("detailChartCanvasMain");
   const v = document.getElementById("detailChartCanvasVol");
   const a = document.getElementById("detailChartCanvasAxis");
@@ -5495,118 +5496,69 @@ function bindDetailChartScrollSyncOnce() {
   return;
 }
 
-function bindDetailChartDragPanOnce() {
-  const stack = document.getElementById("detailChartCanvasStack");
+function syncDetailChartPaginationUi(stockId) {
+  const bar = document.getElementById("detailChartPaginationBar");
+  const prev = document.getElementById("btnDetailChartPrev");
+  const next = document.getElementById("btnDetailChartNext");
+  if (!bar || !prev || !next) return;
+  const range = detailChartRange || "d1";
+  if (range === "all") {
+    bar.hidden = true;
+    prev.disabled = true;
+    next.disabled = true;
+    return;
+  }
+  const full = buildFullCanvasRowsForScrollChart(stockId);
+  const n = full.length;
+  const size = DETAIL_CHART_PAGE_SIZE[range];
+  if (!size || n === 0) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  const end = Math.max(0, n - detailChartPageIndex * size);
+  const start = Math.max(0, end - size);
+  prev.disabled = start <= 0;
+  next.disabled = detailChartPageIndex <= 0;
+}
+
+function bindDetailChartPaginationOnce() {
+  const bar = document.getElementById("detailChartPaginationBar");
+  if (!bar || bar.dataset.paginationBound === "1") return;
+  bar.dataset.paginationBound = "1";
+  const prev = document.getElementById("btnDetailChartPrev");
+  const next = document.getElementById("btnDetailChartNext");
+  const goPrev = () => {
+    const sid = selectedStockId || detailChartView.stockId;
+    if (!sid) return;
+    const range = detailChartRange || "d1";
+    if (range === "all") return;
+    const size = DETAIL_CHART_PAGE_SIZE[range];
+    const full = buildFullCanvasRowsForScrollChart(sid);
+    const n = full.length;
+    const end = Math.max(0, n - detailChartPageIndex * size);
+    const start = Math.max(0, end - size);
+    if (start <= 0) return;
+    detailChartPageIndex += 1;
+    renderScrollDetailCharts(sid, { preserveScroll: true });
+  };
+  const goNext = () => {
+    const sid = selectedStockId || detailChartView.stockId;
+    if (!sid) return;
+    if (detailChartPageIndex <= 0) return;
+    detailChartPageIndex -= 1;
+    renderScrollDetailCharts(sid, { preserveScroll: true });
+  };
+  prev?.addEventListener("click", goPrev);
+  next?.addEventListener("click", goNext);
+}
+
+function bindDetailChartCrosshairOnce() {
   const main = document.getElementById("detailChartCanvasMain");
-  if (!stack || !main || stack.dataset.dragPanBound === "1") return;
-  stack.dataset.dragPanBound = "1";
-
-  const clampOff = () => {
-    const maxO = detailChartInteraction.maxOffset;
-    let v = detailChartInteraction.viewOffset;
-    v = Math.max(0, Math.min(maxO, v));
-    detailChartInteraction.viewOffset = v;
-  };
-
-  const applyInertia = () => {
-    stopDetailChartInertia();
-    const step = () => {
-      if (Math.abs(detailChartInteraction.velocity) < 0.1) {
-        detailChartInteraction.inertiaRaf = 0;
-        detailChartInteraction.velocity = 0;
-        return;
-      }
-      detailChartInteraction.viewOffset +=
-        detailChartInteraction.velocity / DETAIL_STEP;
-      clampOff();
-      detailChartInteraction.velocity *= 0.92;
-      if (
-        detailChartInteraction.viewOffset <= 0 ||
-        detailChartInteraction.viewOffset >= detailChartInteraction.maxOffset
-      ) {
-        detailChartInteraction.inertiaRaf = 0;
-        detailChartInteraction.velocity = 0;
-        if (detailChartLiveBundle) paintDetailChartCanvas(detailChartLiveBundle);
-        return;
-      }
-      if (detailChartLiveBundle) paintDetailChartCanvas(detailChartLiveBundle);
-      detailChartInteraction.inertiaRaf = requestAnimationFrame(step);
-    };
-    detailChartInteraction.inertiaRaf = requestAnimationFrame(step);
-  };
-
-  const onDown = (clientX) => {
-    stopDetailChartInertia();
-    detailChartInteraction.pointerDown = true;
-    detailChartInteraction.dragging = true;
-    detailChartInteraction.startClientX = clientX;
-    detailChartInteraction.startViewOffset = detailChartInteraction.viewOffset;
-    detailChartInteraction.lastClientX = clientX;
-    detailChartInteraction.lastMoveTs = performance.now();
-    detailChartInteraction.velocity = 0;
-    stack.classList.add("is-dragging");
-  };
-
-  const onMove = (clientX, dragging) => {
-    if (!dragging) return;
-    const now = performance.now();
-    const dx = clientX - detailChartInteraction.startClientX;
-    const next = detailChartInteraction.startViewOffset + dx / DETAIL_STEP;
-    detailChartInteraction.viewOffset = Math.max(
-      0,
-      Math.min(detailChartInteraction.maxOffset, next)
-    );
-    const dt = Math.max(1, now - detailChartInteraction.lastMoveTs);
-    const inst = ((clientX - detailChartInteraction.lastClientX) / dt) * 16;
-    detailChartInteraction.velocity = inst;
-    detailChartInteraction.lastClientX = clientX;
-    detailChartInteraction.lastMoveTs = now;
-    if (detailChartLiveBundle) paintDetailChartCanvas(detailChartLiveBundle);
-  };
-
-  const onUp = () => {
-    if (!detailChartInteraction.dragging) return;
-    detailChartInteraction.dragging = false;
-    detailChartInteraction.pointerDown = false;
-    stack.classList.remove("is-dragging");
-    applyInertia();
-  };
-
-  stack.addEventListener("mousedown", (e) => {
-    if (e.button !== 0) return;
-    onDown(e.clientX);
-    e.preventDefault();
-  });
-  window.addEventListener("mousemove", (e) => {
-    onMove(e.clientX, detailChartInteraction.dragging);
-  });
-  window.addEventListener("mouseup", onUp);
-
-  stack.addEventListener(
-    "touchstart",
-    (e) => {
-      if (e.touches.length !== 1) return;
-      onDown(e.touches[0].clientX);
-    },
-    { passive: true }
-  );
-  window.addEventListener(
-    "touchmove",
-    (e) => {
-      if (!detailChartInteraction.dragging || e.touches.length !== 1) return;
-      onMove(e.touches[0].clientX, true);
-    },
-    { passive: true }
-  );
-  window.addEventListener("touchend", onUp);
-
-  stack.addEventListener("mouseleave", () => {
-    if (detailChartInteraction.dragging) onUp();
-  });
-
+  if (!main || main.dataset.crosshairBound === "1") return;
+  main.dataset.crosshairBound = "1";
   main.addEventListener("mousemove", (e) => {
     if (!detailChartLiveBundle) return;
-    if (detailChartInteraction.dragging) return;
     const idx = detailChartIndexFromClientX(e.clientX, main, detailChartLiveBundle);
     const rect = main.getBoundingClientRect();
     const y = e.clientY - rect.top;
@@ -5620,7 +5572,6 @@ function bindDetailChartDragPanOnce() {
     else updateDetailChartOhlcHud(null);
     paintDetailChartCanvas(detailChartLiveBundle);
   });
-
   main.addEventListener("mouseleave", () => {
     if (!detailChartLiveBundle) return;
     detailChartInteraction.crossIdx = null;
@@ -5628,11 +5579,10 @@ function bindDetailChartDragPanOnce() {
     updateDetailChartOhlcHud(null);
     paintDetailChartCanvas(detailChartLiveBundle);
   });
-
   main.addEventListener(
     "touchmove",
     (e) => {
-      if (detailChartInteraction.dragging || !detailChartLiveBundle) return;
+      if (!detailChartLiveBundle) return;
       if (e.touches.length !== 1) return;
       const idx = detailChartIndexFromClientX(
         e.touches[0].clientX,
@@ -5689,7 +5639,6 @@ function renderChart(stockId, opts) {
 
 function renderScrollDetailCharts(stockId, opts = {}) {
   const preserveScroll = opts.preserveScroll === true;
-  const logChartRange = opts.logChartRange === true;
   detailChartView.stockId = stockId;
   detailChartView.chartRange = detailChartRange;
   detailChartView.chartType = detailChartType;
@@ -5702,13 +5651,8 @@ function renderScrollDetailCharts(stockId, opts = {}) {
     rows = [];
   }
 
-  if (logChartRange) {
-    console.log(
-      `[chart] range=${detailChartRange || "d1"}, filtered=${rows.length}개`
-    );
-  }
-
   if (!rows.length) {
+    syncDetailChartPaginationUi(stockId);
     setDetailChartCanvasPlaceholder("\ub370\uc774\ud130 \ub85c\ub529 \uc911\u2026");
     return;
   }
@@ -5718,9 +5662,12 @@ function renderScrollDetailCharts(stockId, opts = {}) {
     if (!bundle) return;
     detailChartLiveBundle = bundle;
     paintDetailChartCanvas(bundle);
-    bindDetailChartDragPanOnce();
+    syncDetailChartPaginationUi(stockId);
+    bindDetailChartPaginationOnce();
+    bindDetailChartCrosshairOnce();
   } catch (e) {
     console.warn("renderScrollDetailCharts", e);
+    syncDetailChartPaginationUi(stockId);
     setDetailChartCanvasPlaceholder("\ub370\uc774\ud130 \ub85c\ub529 \uc911\u2026");
   }
 }
@@ -5728,6 +5675,7 @@ function renderScrollDetailCharts(stockId, opts = {}) {
 function initDetailCharts(stockId, opts) {
   const s = getStockById(stockId);
   if (!s) return;
+  detailChartPageIndex = 0;
   destroyDetailCharts();
   renderScrollDetailCharts(stockId, {
     preserveScroll: false,
@@ -5747,7 +5695,7 @@ const COMMUNITY_AI_LINES = {
     "이거 진짜 대박 각 나왔다",
     "차트 보니까 심장이 두근거림",
     "물타기 존버 승리다",
-    "기관이 들어온 거 아님? 체결 미쳤네",
+    "|�들:",
     "내일 시초가 상한가 각",
     "추천 ㅊㅊ 이거 왜 안 사 ㄹㅇ",
     "오늘 저녁은 소고기다 ㅋㅋ",
@@ -5797,13 +5745,13 @@ const COMMUNITY_CONTRARIAN_LINES = {
   bull: [
     "이럴 때가 제일 위험한 거 알지? 거래량 식으면 바로 눌린다",
     "고점 냄새 진하게 난다, 난 분할매도 중",
-    "다들 환호할 때 조심하는 게 국룰",
+    "|�들:",
     "재료 소멸이면 순식간에 음봉 나옴",
   ],
   bear: [
     "공포 구간에서 줍는 사람이 결국 먹더라",
     "이 정도 하락이면 악재 반영 끝 아닌가",
-    "다들 던질 때 한 주씩 모아간다",
+    "|�들:",
     "바닥 다지는 느낌인데 나만 보이나",
   ],
   delist: [
@@ -5840,7 +5788,7 @@ function buildDynamicCommunityLine(stockId, regime) {
     "추천/비추 갈린다",
     "실시간으로 분위기 뒤집히는 중",
     "댓글창 여론전 치열하다",
-    "개미들 희비 교차 중",
+    "|�들:",
     "단타 vs 존버 전쟁터",
   ];
   const tail = pickCommunityLine(tailPool);
