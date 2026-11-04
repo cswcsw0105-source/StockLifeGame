@@ -3,7 +3,7 @@
 <body><header><div class="wrap mast"><strong><i></i> STOCK LIFE <span>LEAGUE</span></strong><button id="reset" class="ghost">시즌 초기화</button></div></header>
 <main class="wrap">
 <section class="hero"><div><small>가상 주식 트레이딩 리그</small><h1>스톡라이프 리그</h1><p>AI 트레이더 7명과 각자 배정된 3개 종목으로 겨룹니다. 5거래일마다 최하위가 탈락합니다.</p></div><div id="season" class="season"></div></section>
-<section id="turn-panel" class="panel"><div class="row"><p id="queued" role="status"></p><button id="advance">다음 턴 진행 →</button></div><p id="feedback" role="status"></p></section>
+<section id="turn-panel" class="panel"><div class="timer-row"><label><input id="speed-mode" type="checkbox" autocomplete="off" aria-describedby="timer-hint"> 30초 속전 모드</label><output id="countdown" role="timer" aria-label="남은 시간" hidden></output></div><p id="timer-hint" class="hint" hidden>시간이 끝나면 대기 주문을 처리합니다. 선택이 없으면 관망합니다. 다른 탭에서는 시간이 멈춥니다.</p><div class="row"><p id="queued" role="status"></p><button id="advance">다음 턴 진행 →</button></div><p id="feedback" role="status"></p></section>
 <div id="result" hidden></div>
 <div class="layout">
 <div class="market">

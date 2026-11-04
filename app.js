@@ -6,6 +6,10 @@ const won=n=>number(n)+"원";
 const pct=n=>((n/capital-1)*100).toFixed(2)+"%";
 let seed=Date.now()>>>0, actions=[], state=create(0,seed);
 let queued, feedback="";
+const turnDuration = 30_000;
+const speed = $("speed-mode");
+speed.checked = false;
+let timer, deadline, remaining = turnDuration;
 try {
  const saved=loadSeason();
  if(saved) ({seed,actions,state}=saved);
@@ -26,7 +30,7 @@ function startSeason(division) {
  state=create(division,seed);
  symbol=state.players[0].symbols[0];
  $("error").textContent="";
- save();render();
+ save();render();resetTimer();
 }
 function chart() {
  const bars=state.market[symbol].bars.slice(-24);
@@ -86,22 +90,64 @@ function select(side) {
   queued=draft;render();
  } catch(error){$("error").textContent=error.message;}
 }
-function progress() {
- if(queued===undefined) return;
+function progress(timedOut=false) {
+ if(state.winner!==null || (queued===undefined && !timedOut)) return;
  $("error").textContent="";
  try {
   const code=queued?.code??symbol, before=state.market[code].price;
-  const next=advance(state,queued), after=next.market[code].price;
+  const order=queued??null;
+  const next=advance(state,order), after=next.market[code].price;
   const name=firms.find(([id])=>id===code)[1], change=(after/before-1)*100;
   const side=queued?.side;
   const result=side==="buy"?"매수 체결":side==="sell"?"매도 체결":"보유·관망";
-  feedback=result+" · "+name+" "+won(before)+" → "+won(after)+" ("+
+  feedback=(timedOut?"시간 종료 · ":"")+result+" · "+name+" "+won(before)+" → "+won(after)+" ("+
    (change>0?"+":"")+change.toFixed(2)+"%)";
-  actions.push(queued);state=next;queued=undefined;save();render();
- } catch(error){$("error").textContent=error.message;}
+  actions.push(order);state=next;queued=undefined;save();render();resetTimer();
+ } catch(error){
+  if(timedOut) {speed.checked=false;resetTimer();}
+  $("error").textContent=error.message;
+ }
 }
 $("symbols").onclick=e=>{if(e.target.dataset.code){symbol=e.target.dataset.code;render();}};
 $("buy").onclick=()=>select("buy");$("sell").onclick=()=>select("sell");$("wait").onclick=()=>select();
-$("advance").onclick=progress;
+$("advance").onclick=()=>progress();
+
+function showClock() {
+ const output=$("countdown");
+ output.hidden=!speed.checked;
+ $("timer-hint").hidden=!speed.checked;
+ if(!speed.checked) return;
+ const ms=deadline===undefined?remaining:Math.max(0,deadline-performance.now());
+ const seconds=Math.ceil(ms/1000);
+ output.textContent=document.hidden?"일시정지 · "+seconds+"초":seconds+"초";
+ output.dataset.urgent=String(seconds<=5);
+}
+function tick() {
+ showClock();
+ const ms=deadline-performance.now();
+ if(ms<=0) progress(true);
+ else timer=setTimeout(tick,Math.min(ms,200));
+}
+function pauseTimer() {
+ clearTimeout(timer);
+ if(deadline!==undefined) remaining=Math.max(0,deadline-performance.now());
+ deadline=undefined;
+ showClock();
+}
+function resumeTimer() {
+ if(!speed.checked || state.winner!==null || document.hidden || deadline!==undefined) return;
+ deadline=performance.now()+remaining;
+ tick();
+}
+function resetTimer() {
+ clearTimeout(timer);
+ deadline=undefined;
+ remaining=turnDuration;
+ showClock();
+ resumeTimer();
+}
+speed.onchange=resetTimer;
+document.addEventListener("visibilitychange",()=>document.hidden?pauseTimer():resumeTimer());
 $("reset").onclick=()=>{if(confirm("현재 리그의 시즌을 초기화할까요?"))startSeason(state.division);};
 render();
+resetTimer();
