@@ -1,4 +1,4 @@
-import {capital,firms,rivals,divisions,phases,grade,create,value,ranking,advance,playerTrade,finishEarly} from "./engine.js";
+import {capital,firms,rivals,divisions,phases,create,value,ranking,advance,playerTrade,finishEarly} from "./engine.js";
 const $=id=>document.getElementById(id);
 import {loadSeason,saveSeason,orderToken} from "./save.js";
 const number=n=>n.toLocaleString("ko-KR");
@@ -59,7 +59,16 @@ function render() {
  const own=me.symbols;
  $("turn-panel").hidden=closed;
  $("season").innerHTML='<strong>'+divisions[state.division]+' 리그</strong>'+(closed?'시즌 종료':Math.ceil(day/5)+'주차 · '+day+'일 · '+phase);
- $("news").innerHTML=n&&own.includes(n.code)?'<h2>'+n.title+'</h2><span class="badge '+(n.impact>0?"positive":"negative")+'">'+grade[n.impact]+'</span><p>'+firms.find(([code])=>code===n.code)[1]+' · '+(n.expected?"시장에 돌던 소문입니다. 일부는 이미 가격에 반영됐을 수 있습니다.":"시장에 새로 공개된 정보입니다.")+'</p>':closed?'<p>시즌이 마감됐습니다.</p>':'<p>이번 턴에는 배정 종목 관련 뉴스가 없습니다.</p>';
+ const newsPanel=$("news");
+ newsPanel.replaceChildren();
+ const headline=document.createElement(n?"h2":"p");
+ headline.textContent=n?.title??"시즌이 마감됐습니다.";
+ newsPanel.append(headline);
+ if(n?.body) {
+  const body=document.createElement("p");
+  body.textContent=n.body;
+  newsPanel.append(body);
+ }
  $("symbols").innerHTML=firms.filter(([code])=>own.includes(code)).map(([code,name])=>'<button data-code="'+code+'" class="'+(code===symbol?"selected":"")+'" aria-pressed="'+(code===symbol)+'">'+name+'</button>').join("");
  const market=state.market[symbol], last=market.bars.at(-1);
  const move=last?((last.close/last.open-1)*100):0;
@@ -168,5 +177,15 @@ function resetTimer() {
 speed.onchange=resetTimer;
 document.addEventListener("visibilitychange",()=>document.hidden?pauseTimer():resumeTimer());
 $("reset").onclick=()=>{if(confirm("현재 리그의 시즌을 초기화할까요?"))startSeason(state.division);};
+const tutorial=$("tutorial");
+try {tutorial.open=!localStorage.getItem("stocklife_tutorial_seen");}
+catch {tutorial.open=true;}
+function rememberTutorial() {
+ if(!tutorial.open) {
+  try {localStorage.setItem("stocklife_tutorial_seen","1");} catch {}
+ }
+}
+tutorial.addEventListener("toggle",rememberTutorial);
+$("tutorial-done").onclick=()=>{tutorial.open=false;rememberTutorial();};
 render();
 resetTimer();

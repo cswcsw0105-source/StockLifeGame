@@ -1,5 +1,5 @@
 export const capital = 1_000_000;
-import {firms,stories} from "./content.js";
+import {firms,stories,marketBriefs} from "./content.js";
 export {firms};
 export const rivals = [
   ["헤드라인", "뉴스 추종"], ["스프린트", "추세 추종"], ["리바운드", "낙폭 반등"],
@@ -19,17 +19,42 @@ function drawSymbols(state) {
   const pool = firms.map(([code]) => code);
   return Array.from({length:3}, () => pool.splice(Math.floor(random(state)*pool.length), 1)[0]);
 }
-function news(state) {
+function legacyNews(state) {
   const eligible = stories.filter(([,title]) => title !== state.news?.title);
   const [code, title, impact] = eligible[Math.floor(random(state)*eligible.length)];
   return {code, title, impact, expected: random(state) < .35};
 }
-export function create(division=0, seed=Date.now()>>>0) {
+function news(state) {
+  if (!state.newsRules) return legacyNews(state);
+  const previous = state.news?.article;
+  const assigned = state.players[0].symbols;
+  const relevant = marketBriefs.flatMap((brief,index)=>
+    brief[2].some(([code])=>assigned.includes(code)) ? [index] : []);
+  let candidates = relevant.filter(index=>!state.seenBriefs.includes(index));
+  if (!candidates.length) {
+    state.seenBriefs = [];
+    candidates = relevant.filter(index=>index!==previous);
+  }
+  const article = candidates[Math.floor(random(state)*candidates.length)];
+  state.seenBriefs.push(article);
+  const [title, body, outcomes] = marketBriefs[article];
+  const names = new Map(firms.map(([code,name])=>[code,name]));
+  const expand = text=>text.replace(/\{([A-Z]+)\}/g, (_,code)=>names.get(code)??code);
+  return {article, title:expand(title), body:expand(body), outcomes};
+}
+export function upgradeNews(state) {
+  if (state.winner!==null || state.newsRules) return;
+  state.newsRules=2;
+  state.seenBriefs=[];
+  state.news=news(state);
+}
+export function create(division=0, seed=Date.now()>>>0, withBriefs=true) {
   const state = {version:1, division, seed, turn:0, winner:null, players:[],
     market:Object.fromEntries(firms.map(([code,,,price])=>[code,{price, bars:[], drift:0}])),
     trades:[], closing:[], news:null};
   state.players=names.map((name,id)=>({...createPlayer(name,id), symbols:drawSymbols(state)}));
-  state.news=news(state);
+  if(withBriefs) upgradeNews(state);
+  else state.news=legacyNews(state);
   return state;
 }
 export const value = (p,s) => p.cash + Object.entries(p.holdings).reduce((a,[code,h])=>a+h.qty*s.market[code].price,0);
@@ -65,8 +90,19 @@ export function finishEarly(state) {
   state.news=null;
   return state;
 }
+function readNews(s,p) {
+  if (!s.newsRules) return s.news;
+  const signals=s.news.outcomes.filter(([code])=>p.symbols.includes(code));
+  const bullish=signals.find(([,reading])=>reading>0);
+  const bearish=signals.find(([,reading])=>reading<0);
+  const lead=bullish??bearish;
+  const price=s.market[lead?.[0]];
+  const last=price?.bars.at(-1);
+  const alreadyMoved=last ? Math.abs(last.close/last.open-1)>=.035 : false;
+  return {code:lead?.[0], impact:lead?.[1]??0, expected:alreadyMoved, bearish:bearish?.[0]};
+}
 function decide(s,p,place,legacyFees) {
-  const n=s.news;
+  const n=readNews(s,p);
   const entries=firms.filter(([code])=>p.symbols.includes(code)).map(([code,,,base])=>{
     const m=s.market[code], last=m.bars.at(-1);
     return {code,price:m.price,momentum:last?(last.close-last.open)/last.open:0,relative:m.price/base-1};
@@ -76,7 +112,7 @@ function decide(s,p,place,legacyFees) {
     const ret=s.market[code].price*h.qty/h.basis-1;
     const stop=style===5?-.025:style===6?-.14:-.075;
     const target=style===3?.055:style===5?.035:.10;
-    if(ret<stop || ret>target || (style===1 && code===n.code && n.impact<0))
+    if(ret<stop || ret>target || (style===1 && (code===n.bearish || (code===n.code && n.impact<0))))
       return {code,side:"sell",qty:h.qty};
   }
   const sorted = (key,descending=true) => entries.slice().sort((a,b)=>descending?b[key]-a[key]:a[key]-b[key]);
@@ -85,8 +121,8 @@ function decide(s,p,place,legacyFees) {
     case 1: if(n.impact>0) pick=entries.find(e=>e.code===n.code); fraction=.43; break;
     case 2: pick=sorted("momentum")[0]; if(pick.momentum<.012) return; fraction=.31; break;
     case 3: pick=sorted("momentum",false)[0]; if(pick.momentum>-.035) return; break;
-    case 4: pick=entries.find(e=>!p.holdings[e.code] && !(e.code===n.code && n.impact<0)); fraction=.17; break;
-    case 5: if(n.impact===2 && !n.expected) pick=entries.find(e=>e.code===n.code); fraction=.32; break;
+    case 4: pick=entries.find(e=>!p.holdings[e.code] && !(e.code===n.bearish || (e.code===n.code && n.impact<0))); fraction=.17; break;
+    case 5: if((s.newsRules?n.impact>0:n.impact===2) && !n.expected) pick=entries.find(e=>e.code===n.code); fraction=.32; break;
     case 6: pick=sorted("relative",false)[0]; if(pick.relative>-.065) return; fraction=.21; break;
     case 7: if(n.impact>0) pick=entries.find(e=>e.code===n.code);
       fraction=place>=ranking(s).length-2?.60:.14; break;
@@ -104,15 +140,26 @@ export function advance(previous,order=null,legacyFees=false) {
   const fills=[...s.trades.filter(fill=>fill.turn===s.turn),...newFills];
   s.trades.push(...newFills);
   for(const [code] of firms) {
-    const m=s.market[code], open=m.price, targeted=code===s.news.code;
-    const shock=targeted ? s.news.impact*(s.news.expected?.019:.043)*(0.6+random(s)*.8):0;
-    const reversal=targeted && s.news.expected ? -Math.sign(shock)*random(s)*.043 : 0;
+    const m=s.market[code], open=m.price;
+    let shock=0, reversal=0;
+    if(s.newsRules) {
+      const event=s.news.outcomes.find(([symbol])=>symbol===code);
+      if(event && event[2]) {
+        shock=event[2]/100*(.65+random(s)*.7);
+        const last=m.bars.at(-1);
+        if(last && Math.sign(last.close-last.open)===Math.sign(shock))
+          reversal=-(last.close/last.open-1)*.30;
+      }
+    } else if(code===s.news.code) {
+      shock=s.news.impact*(s.news.expected?.019:.043)*(.6+random(s)*.8);
+      reversal=s.news.expected?-Math.sign(shock)*random(s)*.043:0;
+    }
     const flow=fills.filter(f=>f.code===code).reduce((a,f)=>a+(f.side==="buy"?1:-1)*f.qty*open,0);
     const movement=(random(s)-.5)*.035+m.drift+shock+reversal+Math.max(-.014,Math.min(.014,flow/55_000_000));
     const close=Math.max(100, money(open*(1+Math.max(-.19,Math.min(.19,movement)))));
     const high=money(Math.max(open,close)*(1+random(s)*.016));
     const low=money(Math.min(open,close)*(1-random(s)*.016));
-    m.price=close; m.drift=targeted?shock*.24:m.drift*.36;
+    m.price=close; m.drift=(s.newsRules ? shock!==0 : code===s.news.code)?shock*.24:m.drift*.36;
     m.bars.push({turn:s.turn,open,high,low,close});
   }
   s.turn++;

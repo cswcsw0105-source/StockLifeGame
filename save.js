@@ -1,6 +1,7 @@
-import {create, advance, firms, divisions, playerTrade, finishEarly} from "./engine.js";
+import {create, advance, firms, divisions, playerTrade, finishEarly, upgradeNews} from "./engine.js";
 
-const key = "stocklife_season_v4";
+const key = "stocklife_season_v5";
+const previousKey = "stocklife_season_v4";
 const legacyKey = "stocklife_season_v3";
 
 export function orderToken(order) {
@@ -17,20 +18,29 @@ export function encodeSeason(seed, division, actions) {
   return [seed.toString(36),division,...actions].join(".");
 }
 
-export function decodeSeason(value,legacy=false) {
+export function decodeSeason(value,version=5) {
   if(!value) throw Error("저장된 시즌 형식 오류");
   const [seedText,divisionText,...tokens]=value.split(".");
   if(!/^[0-9a-z]{1,7}$/.test(seedText) || !/^[0-2]$/.test(divisionText))
     throw Error("저장된 시즌 형식 오류");
   const seed=parseInt(seedText,36), division=Number(divisionText);
   if(seed>0xffffffff || !divisions[division]) throw Error("저장된 시즌 형식 오류");
-  const actions=legacy?tokens.map(token=>"l"+token):tokens;
-  let state=create(division,seed);
-  for(const token of actions) {
+  const actions=version===3?tokens.map(token=>"l"+token):tokens;
+  const older=version<5 || actions[0]==="v";
+  let state=create(division,seed,!older);
+  for(const token of actions[0]==="v"?actions.slice(1):actions) {
     if(token==="h") state=advance(state);
     else if(token==="e") finishEarly(state);
+    else if(token==="n") upgradeNews(state);
     else if(token[0]==="l") state=advance(state,token==="lh"?null:decodeOrder(token.slice(1)),true);
     else playerTrade(state,decodeOrder(token));
+  }
+  if(version<5) {
+    actions.unshift("v");
+    if(state.winner===null) {
+      actions.push("n");
+      upgradeNews(state);
+    }
   }
   return {seed,actions,state};
 }
@@ -43,8 +53,10 @@ export function loadSeason() {
   const stored=cookieValue(key);
   if(stored==="~") return decodeSeason(localStorage.getItem(key));
   if(stored) return decodeSeason(stored);
+  const previous=cookieValue(previousKey);
+  if(previous) return decodeSeason(previous==="~"?localStorage.getItem(previousKey):previous,4);
   const old=cookieValue(legacyKey);
-  return old?decodeSeason(old,true):null;
+  return old?decodeSeason(old,3):null;
 }
 
 export function saveSeason(seed,division,actions) {
