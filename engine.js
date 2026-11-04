@@ -1,6 +1,8 @@
 export const capital = 1_000_000;
-import {firms,stories,marketBriefs} from "./content.js";
+import {firms,marketBriefs} from "./content.js";
+import {firms as formerFirms,stories,marketBriefs as formerBriefs} from "./legacy-content.js";
 export {firms};
+export const roster = state => state.formerMarket?formerFirms:firms;
 export const rivals = [
   ["헤드라인", "뉴스 추종"], ["스프린트", "추세 추종"], ["리바운드", "낙폭 반등"],
   ["리밸런서", "분산 배분"], ["퀵컷", "빠른 손절"], ["딥밸류", "저평가 매집"], ["파이널랩", "순위 따라 베팅"],
@@ -16,7 +18,7 @@ function random(state) {
   return state.seed / 4294967296;
 }
 function drawSymbols(state) {
-  const pool = firms.map(([code]) => code);
+  const pool = roster(state).map(([code]) => code);
   return Array.from({length:3}, () => pool.splice(Math.floor(random(state)*pool.length), 1)[0]);
 }
 function legacyNews(state) {
@@ -28,7 +30,8 @@ function news(state) {
   if (!state.newsRules) return legacyNews(state);
   const previous = state.news?.article;
   const assigned = state.players[0].symbols;
-  const relevant = marketBriefs.flatMap((brief,index)=>
+  const briefs = state.formerMarket?formerBriefs:marketBriefs;
+  const relevant = briefs.flatMap((brief,index)=>
     brief[2].some(([code])=>assigned.includes(code)) ? [index] : []);
   let candidates = relevant.filter(index=>!state.seenBriefs.includes(index));
   if (!candidates.length) {
@@ -37,8 +40,8 @@ function news(state) {
   }
   const article = candidates[Math.floor(random(state)*candidates.length)];
   state.seenBriefs.push(article);
-  const [title, body, outcomes] = marketBriefs[article];
-  const names = new Map(firms.map(([code,name])=>[code,name]));
+  const [title, body, outcomes] = briefs[article];
+  const names = new Map(roster(state).map(([code,name])=>[code,name]));
   const expand = text=>text.replace(/\{([A-Z]+)\}/g, (_,code)=>names.get(code)??code);
   return {article, title:expand(title), body:expand(body), outcomes};
 }
@@ -48,15 +51,42 @@ export function upgradeNews(state) {
   state.seenBriefs=[];
   state.news=news(state);
 }
-export function create(division=0, seed=Date.now()>>>0, withBriefs=true, difficulty=1) {
+export function create(division=0, seed=Date.now()>>>0, withBriefs=true, difficulty=1, formerMarket=false) {
   const state = {version:1, division, seed, turn:0, winner:null, players:[],
-    market:Object.fromEntries(firms.map(([code,,,price])=>[code,{price, bars:[], drift:0}])),
-    trades:[], closing:[], news:null};
+    formerMarket, trades:[], closing:[], news:null};
+  state.market=Object.fromEntries(roster(state).map(([code,,,price])=>[code,{price,bars:[],drift:0}]));
   state.players=names.map((name,id)=>({...createPlayer(name,id), symbols:drawSymbols(state)}));
   if(difficulty!==1) state.difficulty=difficulty;
   if(withBriefs) upgradeNews(state);
   else state.news=legacyNews(state);
   return state;
+}
+export function updateRoster(state) {
+  if(!state.formerMarket) return;
+  const active = new Set(firms.map(([code])=>code));
+  const retired = roster(state).map(([code])=>code).filter(code=>!active.has(code));
+  for(const player of state.players) {
+    for(const code of retired) {
+      const holding=player.holdings[code];
+      if(holding) {
+        player.cash+=holding.qty*state.market[code].price;
+        delete player.holdings[code];
+      }
+    }
+    const kept=player.symbols.filter(code=>active.has(code));
+    const available=firms.map(([code])=>code).filter(code=>!kept.includes(code));
+    while(kept.length<3) {
+      const index=((state.seed+player.id+kept.length)>>>0)%available.length;
+      kept.push(available.splice(index,1)[0]);
+    }
+    player.symbols=kept;
+  }
+  for(const code of retired) delete state.market[code];
+  state.formerMarket=false;
+  state.newsRules=2;
+  state.seenBriefs=[];
+  state.news=null;
+  if(state.winner===null) state.news=news(state);
 }
 export const value = (p,s) => p.cash + Object.entries(p.holdings).reduce((a,[code,h])=>a+h.qty*s.market[code].price,0);
 export const ranking = s => s.players.filter(p=>p.active).sort((a,b)=>value(b,s)-value(a,s) || a.id-b.id);
@@ -104,7 +134,7 @@ function readNews(s,p) {
 }
 function decide(s,p,place,legacyFees) {
   const n=readNews(s,p);
-  const entries=firms.filter(([code])=>p.symbols.includes(code)).map(([code,,,base])=>{
+  const entries=roster(s).filter(([code])=>p.symbols.includes(code)).map(([code,,,base])=>{
     const m=s.market[code], last=m.bars.at(-1);
     return {code,price:m.price,momentum:last?(last.close-last.open)/last.open:0,relative:m.price/base-1};
   });
@@ -148,7 +178,7 @@ export function advance(previous,order=null,legacyFees=false) {
     ...planned.map(([id,request])=>trade(s,s.players[id],request,legacyFees))].filter(Boolean);
   const fills=[...s.trades.filter(fill=>fill.turn===s.turn),...newFills];
   s.trades.push(...newFills);
-  for(const [code] of firms) {
+  for(const [code] of roster(s)) {
     const m=s.market[code], open=m.price;
     let shock=0, reversal=0;
     if(s.newsRules) {

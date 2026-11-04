@@ -71,7 +71,7 @@ function render() {
   body.textContent=n.body;
   newsPanel.append(body);
  }
- $("symbols").innerHTML=firms.filter(([code])=>own.includes(code)).map(([code,name])=>'<button data-code="'+code+'" class="'+(code===symbol?"selected":"")+'" aria-pressed="'+(code===symbol)+'">'+name+'</button>').join("");
+ $("symbols").innerHTML=firms.filter(([code])=>own.includes(code)).map(([code,name,industry])=>'<button data-code="'+code+'" class="'+(code===symbol?"selected":"")+'" aria-pressed="'+(code===symbol)+'">'+name+'<small class="industry">'+industry+'</small></button>').join("");
  const market=state.market[symbol], last=market.bars.at(-1);
  const move=last?((last.close/last.open-1)*100):0;
  $("orderinfo").textContent=won(market.price)+" · 직전 턴 "+(move>0?"+":"")+move.toFixed(2)+"% · 보유 "+(me.holdings[symbol]?.qty||0)+"주";
@@ -220,7 +220,7 @@ function openTraining() {
  renderTraining();
 }
 function renderTraining() {
- const company=firms.find(([code])=>code===practiceCode)[1];
+ const [,company,industry]=firms.find(([code])=>code===practiceCode);
  const player=practice.players[0];
  const price=practice.market[practiceCode].price;
  const quotes=[
@@ -229,7 +229,7 @@ function renderTraining() {
   "새 가격이 공개됐습니다. 1주를 팔아 매도 금액이 예수금에 들어오는지 확인하세요.",
   "매수, 턴 진행, 매도를 연습했습니다. 본게임에서는 직접 수량과 타이밍을 정합니다.",
  ];
- $("training-news").textContent=trainingStep<2?company+" · 공급 계약 발표":company+" · 오전 가격 "+won(price);
+ $("training-news").textContent=trainingStep<2?company+" · "+industry+" 사업 계약 발표":company+" · 오전 가격 "+won(price);
  $("training-account").textContent="예수금 "+won(player.cash)+" · 현재가 "+won(price)+" · 보유 "+(player.holdings[practiceCode]?.qty??0)+"주";
  $("training-guide").textContent=quotes[trainingStep];
  $("training-action").textContent=["1주 매수","다음 턴 진행","1주 매도","연습 끝내고 메인으로"][trainingStep];
