@@ -1,15 +1,44 @@
 <!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>스톡라이프 리그</title><link rel="stylesheet" href="style.css"></head>
-<body><header><div class="wrap mast"><strong><i></i> STOCK LIFE <span>LEAGUE</span></strong><button id="reset" class="ghost">시즌 초기화</button></div></header>
+<body><header><div class="wrap mast"><strong><i></i> STOCK LIFE <span>LEAGUE</span></strong><button id="back-home" class="ghost" hidden>메인 화면</button></div></header>
 <main class="wrap">
-<section class="hero"><div><small>가상 주식 트레이딩 리그</small><h1>스톡라이프 리그</h1><p>AI 트레이더 7명과 각자 배정된 3개 종목으로 겨룹니다. 5거래일마다 최하위가 탈락합니다.</p></div><div id="season" class="season"></div></section>
-<details id="tutorial" class="panel tutorial">
-<summary>처음이라면 · 30초 플레이 가이드</summary>
-<ol><li><strong>개장 → 오전 → 오후</strong>가 하루예요. 5거래일마다 최하위 한 명이 탈락하고, 순위는 결과 화면에 나와요.</li>
-<li>배정받은 3종목의 가격과 뉴스를 보세요. 계약 규모, 비용 부담, 확정 여부에 따라 한 기사 안에서도 종목별 반응이 달라질 수 있어요.</li>
-<li>매수·매도는 수수료 없이 즉시 체결돼요. <strong>다음 턴 진행</strong>으로 새 가격과 뉴스를 확인하세요. 속전 모드는 턴당 10초예요.</li></ol>
-<button type="button" id="tutorial-done" class="ghost">가이드 접고 시작</button>
-</details>
+<section id="home-screen" class="home-screen">
+ <div class="home-hero">
+  <div class="home-copy"><p class="eyebrow">STOCK LIFE INVITATIONAL</p><h1>스톡라이프<br><em>리그</em></h1>
+   <p class="home-story">키 160cm인 주인공에게 어느 날 주식 트레이딩 대회 초대장이 도착한다. 우승 상품은 원하는 키까지 자랄 수 있다는, 통칭 <strong>‘키 크는 약’</strong>.</p>
+   <p class="home-story">약을 손에 넣으려면 같은 시장에서 각자의 방식으로 돈을 불리는 AI 트레이더 7명을 꺾고, 프리미어 리그 정상에 올라야 한다.</p>
+   <div class="home-actions"><button id="new-game" class="primary">새 게임</button><button id="continue-game" hidden>이어하기</button><button id="open-tutorial" class="ghost">튜토리얼</button></div>
+   <p id="save-summary" class="hint"></p>
+  </div>
+  <div class="prize" aria-label="대회 최종 우승 상품, 키 크는 약"><span>CHAMPION’S PRIZE</span><svg viewBox="0 0 200 156" aria-hidden="true"><path d="M8 130h184 M8 94h184 M8 58h184 M8 22h184" stroke="#27463d" stroke-width="1"/><path d="M15 121l33-24 20 9 25-29 25 8 28-38 29-23" fill="none" stroke="#73d8ae" stroke-width="3"/><path d="M175 43V24h-20" fill="none" stroke="#73d8ae" stroke-width="3"/><g transform="rotate(-29 101 76)"><rect x="62" y="56" width="78" height="40" rx="20" fill="#8df0c4"/><path d="M101 56h19a20 20 0 0 1 0 40h-19z" fill="#f1fff9"/><path d="M101 57v38" stroke="#30694f" stroke-width="2"/></g></svg><strong>키 크는 약</strong><small>프리미어 리그 우승 상품</small></div>
+ </div>
+ <section class="home-rules" aria-label="리그 핵심 규칙"><span><strong>07</strong> AI 라이벌</span><span><strong>03</strong> 배정 종목</span><span><strong>05일</strong>마다 한 명 탈락</span></section>
+</section>
+<section id="setup-screen" class="panel menu-card" hidden>
+ <p class="eyebrow">새 시즌 등록</p><h1>대회 참가 설정</h1>
+ <form id="setup-form">
+  <fieldset><legend>진행 모드</legend>
+   <label class="choice"><input type="radio" name="mode" value="normal" checked><span><strong>기본 모드</strong><small>시간 제한 없이 다음 턴을 직접 넘깁니다.</small></span></label>
+   <label class="choice"><input type="radio" name="mode" value="speed"><span><strong>10초 속전 모드</strong><small>시간이 끝나면 다음 턴으로 자동 진행됩니다.</small></span></label>
+  </fieldset>
+  <fieldset><legend>난이도</legend>
+   <label class="choice"><input type="radio" name="difficulty" value="0"><span><strong>쉬움</strong><small>AI가 거래 빈도와 베팅 비중을 줄입니다.</small></span></label>
+   <label class="choice"><input type="radio" name="difficulty" value="1" checked><span><strong>보통</strong><small>일곱 라이벌이 각자의 기본 전략을 사용합니다.</small></span></label>
+   <label class="choice"><input type="radio" name="difficulty" value="2"><span><strong>어려움</strong><small>AI가 가격 흐름을 더 적극적으로 활용하고 하락에 빠르게 대응합니다.</small></span></label>
+  </fieldset>
+  <div class="home-actions"><button type="submit" class="primary">루키 리그 참가</button><button id="cancel-setup" type="button" class="ghost">메인으로</button></div>
+ </form>
+</section>
+<section id="training-screen" class="panel menu-card" hidden>
+ <p class="eyebrow">연습 계좌 · 본게임 기록과 별도</p><h1>첫 거래 연습</h1>
+ <p class="hint">개장 → 오전 → 오후가 하루예요. 5거래일마다 최하위가 탈락하고 순위는 결과 화면에서 확인해요.</p>
+ <div id="training-news" class="training-news"></div>
+ <div id="training-account" class="training-account"></div>
+ <p id="training-guide" role="status"></p>
+ <div class="home-actions"><button id="training-action" class="primary"></button><button id="leave-training" class="ghost">메인으로</button></div>
+</section>
+<div id="game-screen" hidden>
+<section class="hero"><div><small>가상 주식 트레이딩 리그</small><h1>트레이딩 데스크</h1><p>배정받은 3개 종목으로 AI 트레이더 7명과 경쟁합니다.</p></div><div id="season" class="season"></div></section>
 <section id="turn-panel" class="panel"><div class="timer-row"><label><input id="speed-mode" type="checkbox" autocomplete="off" aria-describedby="timer-hint"> 10초 속전 모드</label><output id="countdown" role="timer" aria-label="남은 시간" hidden></output></div><p id="timer-hint" class="hint" hidden>시간이 끝나면 자동으로 다음 턴을 시작합니다. 다른 탭에서는 시간이 멈춥니다.</p><div class="row"><p class="hint">거래 없이 넘기면 관망으로 진행됩니다.</p><div class="turn-actions"><button id="finish" class="ghost">현재 자산으로 결과 보기</button><button id="advance">다음 턴 진행 →</button></div></div><p id="feedback" role="status"></p></section>
 <div id="result" hidden></div>
 <div class="layout">
@@ -23,4 +52,4 @@
 <section class="panel"><h2>시장가 주문</h2><p class="hint">매수·매도는 현재 표시가에 즉시 체결됩니다. 거래 수수료는 없습니다.</p><div id="orderinfo"></div><div class="orders"><label>수량 <input id="qty" type="number" min="1" step="1" value="1"></label><button id="buy">매수</button><button id="sell">매도</button></div><p id="order-preview" class="hint" aria-live="polite"></p><p id="error" role="alert"></p></section>
 </aside>
 </div><footer>거래와 턴은 이 브라우저에 저장됩니다. 동률이면 고정 참가 번호가 뒤인 선수가 탈락합니다.</footer>
-</main><script type="module" src="app.js"></script></body></html>
+</div></main><script type="module" src="app.js"></script></body></html>

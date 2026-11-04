@@ -48,11 +48,12 @@ export function upgradeNews(state) {
   state.seenBriefs=[];
   state.news=news(state);
 }
-export function create(division=0, seed=Date.now()>>>0, withBriefs=true) {
+export function create(division=0, seed=Date.now()>>>0, withBriefs=true, difficulty=1) {
   const state = {version:1, division, seed, turn:0, winner:null, players:[],
     market:Object.fromEntries(firms.map(([code,,,price])=>[code,{price, bars:[], drift:0}])),
     trades:[], closing:[], news:null};
   state.players=names.map((name,id)=>({...createPlayer(name,id), symbols:drawSymbols(state)}));
+  if(difficulty!==1) state.difficulty=difficulty;
   if(withBriefs) upgradeNews(state);
   else state.news=legacyNews(state);
   return state;
@@ -108,9 +109,12 @@ function decide(s,p,place,legacyFees) {
     return {code,price:m.price,momentum:last?(last.close-last.open)/last.open:0,relative:m.price/base-1};
   });
   const style=p.id, held=Object.entries(p.holdings);
+  const difficulty=s.difficulty??1;
+  if(difficulty===0 && (s.turn+p.id)%3===0) return;
   for(const [code,h] of held) {
     const ret=s.market[code].price*h.qty/h.basis-1;
-    const stop=style===5?-.025:style===6?-.14:-.075;
+    const baseline=style===5?-.025:style===6?-.14:-.075;
+    const stop=difficulty===2?baseline*.72:baseline;
     const target=style===3?.055:style===5?.035:.10;
     if(ret<stop || ret>target || (style===1 && (code===n.bearish || (code===n.code && n.impact<0))))
       return {code,side:"sell",qty:h.qty};
@@ -127,7 +131,12 @@ function decide(s,p,place,legacyFees) {
     case 7: if(n.impact>0) pick=entries.find(e=>e.code===n.code);
       fraction=place>=ranking(s).length-2?.60:.14; break;
   }
+  if(difficulty===2 && (!pick || p.holdings[pick.code])) {
+    pick=sorted("momentum").find(e=>!p.holdings[e.code] && e.momentum>.018 &&
+      e.code!==n.bearish && !(e.code===n.code && n.impact<0));
+  }
   if(!pick || p.holdings[pick.code]) return;
+  if(difficulty===0) fraction*=.65;
   const qty=Math.floor(p.cash*Math.min(.70,fraction+s.division*.035)/(legacyFees?pick.price*1.0025+1:pick.price));
   if(qty>0) return {code:pick.code,side:"buy",qty};
 }

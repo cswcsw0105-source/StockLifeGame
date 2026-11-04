@@ -5,29 +5,31 @@ const number=n=>n.toLocaleString("ko-KR");
 const won=n=>number(n)+"원";
 const pct=n=>((n/capital-1)*100).toFixed(2)+"%";
 let seed=Date.now()>>>0, actions=[], state=create(0,seed);
-let feedback="";
+let feedback="", hasSave=false, screen="home";
+const difficulties=["쉬움","보통","어려움"];
 const turnDuration = 10_000;
 const speed = $("speed-mode");
-speed.checked = false;
+try {speed.checked=localStorage.getItem("stocklife_mode")==="speed";}
+catch {speed.checked=false;}
 let timer, deadline, remaining = turnDuration;
 try {
  const saved=loadSeason();
- if(saved) ({seed,actions,state}=saved);
- else save();
+ if(saved) {({seed,actions,state}=saved);hasSave=true;}
 } catch {
  $("error").textContent="기존 쿠키를 읽지 못해 새 시즌을 열었습니다.";
 }
 let symbol=state.players[0].symbols[0];
 function save() {
+ hasSave=true;
  try {
   if(saveSeason(seed,state.division,actions)) return;
  } catch {}
  $("error").textContent="쿠키 저장이 차단되어 새로고침하면 진행 기록을 잃을 수 있습니다.";
 }
-function startSeason(division) {
+function startSeason(division,difficulty=state.difficulty??1) {
  seed=Date.now()>>>0;
- actions=[]; feedback="";
- state=create(division,seed);
+ actions=difficulty===1?[]:["d"+difficulty]; feedback="";
+ state=create(division,seed,true,difficulty);
  symbol=state.players[0].symbols[0];
  $("error").textContent="";
  save();render();resetTimer();
@@ -58,7 +60,7 @@ function render() {
  const closed=state.winner!==null;
  const own=me.symbols;
  $("turn-panel").hidden=closed;
- $("season").innerHTML='<strong>'+divisions[state.division]+' 리그</strong>'+(closed?'시즌 종료':Math.ceil(day/5)+'주차 · '+day+'일 · '+phase);
+ $("season").innerHTML='<strong>'+divisions[state.division]+' 리그 · '+difficulties[state.difficulty??1]+'</strong>'+(closed?'시즌 종료':Math.ceil(day/5)+'주차 · '+day+'일 · '+phase);
  const newsPanel=$("news");
  newsPanel.replaceChildren();
  const headline=document.createElement(n?"h2":"p");
@@ -85,11 +87,12 @@ function render() {
  result.hidden=!closed;
  if(closed) {
  const win=state.winner===0;
+ const champion=win && state.division===divisions.length-1;
  const standings=[...ranking(state),...state.players.filter(p=>!p.active).sort((a,b)=>b.exit.week-a.exit.week)].map((p,i)=>{
   const v=p.exit?.total??value(p,state);
   return '<div class="rank '+(p.id===0?"me ":"")+(!p.active?"out":"")+'"><div>'+ ((i+1)+'위'+(p.exit?' · '+p.exit.week+'주차 탈락':''))+' · '+p.name+'<small>'+(p.id?rivals[p.id-1][1]:"플레이어")+'</small></div><div>'+won(v)+'<small>'+pct(v)+'</small></div></div>';
  }).join("");
- result.innerHTML='<h2>'+(win?"리그 우승":state.endedEarly?"현재 자산으로 정산":"시즌 탈락")+'</h2><p>'+(win?"다음 리그는 동일한 시작 자금으로 진행합니다.":state.endedEarly?"현재 가격으로 평가한 순위입니다. 조기 정산은 승격에 반영되지 않습니다.":"다음 시즌에 다시 도전할 수 있습니다.")+'</p><h2>시즌 결과</h2><p class="hint">생존자는 시즌 종료 시점, 탈락자는 탈락 시점 기준</p>'+standings+'<button id="next">'+(win&&state.division<divisions.length-1?"상위 리그로 승격":"이 리그 다시 시작")+'</button>';
+ result.innerHTML='<h2>'+(champion?"키 크는 약 획득":win?"리그 우승":state.endedEarly?"현재 자산으로 정산":"시즌 탈락")+'</h2><p>'+(champion?"프리미어 리그 정상에 올라 우승 상품을 받았습니다.":win?"다음 리그는 동일한 시작 자금으로 진행합니다.":state.endedEarly?"현재 가격으로 평가한 순위입니다. 조기 정산은 승격에 반영되지 않습니다.":"다음 시즌에 다시 도전할 수 있습니다.")+'</p><h2>시즌 결과</h2><p class="hint">생존자는 시즌 종료 시점, 탈락자는 탈락 시점 기준</p>'+standings+'<button id="next">'+(win&&state.division<divisions.length-1?"상위 리그로 승격":"이 리그 다시 시작")+'</button>';
  $("next").onclick=()=>{startSeason(Math.min(state.division+(win?1:0),divisions.length-1));};
  }
  chart();
@@ -163,7 +166,7 @@ function pauseTimer() {
  showClock();
 }
 function resumeTimer() {
- if(!speed.checked || state.winner!==null || document.hidden || deadline!==undefined) return;
+ if(screen!=="game" || !speed.checked || state.winner!==null || document.hidden || deadline!==undefined) return;
  deadline=performance.now()+remaining;
  tick();
 }
@@ -174,18 +177,71 @@ function resetTimer() {
  showClock();
  resumeTimer();
 }
-speed.onchange=resetTimer;
-document.addEventListener("visibilitychange",()=>document.hidden?pauseTimer():resumeTimer());
-$("reset").onclick=()=>{if(confirm("현재 리그의 시즌을 초기화할까요?"))startSeason(state.division);};
-const tutorial=$("tutorial");
-try {tutorial.open=!localStorage.getItem("stocklife_tutorial_seen");}
-catch {tutorial.open=true;}
-function rememberTutorial() {
- if(!tutorial.open) {
-  try {localStorage.setItem("stocklife_tutorial_seen","1");} catch {}
- }
+function rememberMode() {
+ try {localStorage.setItem("stocklife_mode",speed.checked?"speed":"normal");} catch {}
 }
-tutorial.addEventListener("toggle",rememberTutorial);
-$("tutorial-done").onclick=()=>{tutorial.open=false;rememberTutorial();};
-render();
-resetTimer();
+speed.onchange=()=>{rememberMode();resetTimer();};
+document.addEventListener("visibilitychange",()=>document.hidden?pauseTimer():resumeTimer());
+
+function showScreen(target) {
+ if(target!=="game") pauseTimer();
+ screen=target;
+ for(const name of ["home","setup","training","game"]) $(name+"-screen").hidden=name!==target;
+ $("back-home").hidden=target!=="game";
+ if(target==="home") {
+  $("continue-game").hidden=!hasSave;
+  $("continue-game").textContent=state.winner===null?"이어하기":"지난 결과 보기";
+  $("save-summary").textContent=hasSave?divisions[state.division]+" 리그 · "+difficulties[state.difficulty??1]+" · "+
+   (state.winner===null?Math.floor(state.turn/3)+1+"일차":"시즌 종료"):"";
+ }
+ if(target==="game") {render();resumeTimer();}
+}
+$("back-home").onclick=()=>showScreen("home");
+$("cancel-setup").onclick=()=>showScreen("home");
+$("new-game").onclick=()=>showScreen("setup");
+$("continue-game").onclick=()=>showScreen("game");
+$("setup-form").onsubmit=event=>{
+ event.preventDefault();
+ if(hasSave && state.winner===null && !confirm("새 게임을 시작하면 진행 중인 시즌이 바뀝니다. 시작할까요?")) return;
+ const settings=new FormData(event.currentTarget);
+ speed.checked=settings.get("mode")==="speed";
+ rememberMode();
+ startSeason(0,Number(settings.get("difficulty")));
+ showScreen("game");
+};
+
+let practice, practiceCode, trainingStep;
+function openTraining() {
+ practice=create(0,42);
+ practiceCode=practice.players[0].symbols[0];
+ practice.news={outcomes:[[practiceCode,1,4.5]]};
+ trainingStep=0;
+ showScreen("training");
+ renderTraining();
+}
+function renderTraining() {
+ const company=firms.find(([code])=>code===practiceCode)[1];
+ const player=practice.players[0];
+ const price=practice.market[practiceCode].price;
+ const quotes=[
+  "대형 계약을 따냈지만 매출은 납품이 끝난 뒤 반영됩니다. 이번에는 조건을 읽고 연습용으로 1주만 사 봅니다.",
+  "체결은 끝났습니다. 다음 턴을 누르면 뉴스가 반영된 가격을 확인할 수 있어요.",
+  "새 가격이 공개됐습니다. 1주를 팔아 매도 금액이 예수금에 들어오는지 확인하세요.",
+  "매수, 턴 진행, 매도를 연습했습니다. 본게임에서는 직접 수량과 타이밍을 정합니다.",
+ ];
+ $("training-news").textContent=trainingStep<2?company+" · 공급 계약 발표":company+" · 오전 가격 "+won(price);
+ $("training-account").textContent="예수금 "+won(player.cash)+" · 현재가 "+won(price)+" · 보유 "+(player.holdings[practiceCode]?.qty??0)+"주";
+ $("training-guide").textContent=quotes[trainingStep];
+ $("training-action").textContent=["1주 매수","다음 턴 진행","1주 매도","연습 끝내고 메인으로"][trainingStep];
+ $("leave-training").hidden=trainingStep===3;
+}
+$("open-tutorial").onclick=openTraining;
+$("leave-training").onclick=()=>showScreen("home");
+$("training-action").onclick=()=>{
+ if(trainingStep===3){showScreen("home");return;}
+ if(trainingStep===1) practice=advance(practice);
+ else playerTrade(practice,{code:practiceCode,side:trainingStep===0?"buy":"sell",qty:1});
+ trainingStep++;
+ renderTraining();
+};
+showScreen("home");

@@ -27,8 +27,11 @@ export function decodeSeason(value,version=5) {
   if(seed>0xffffffff || !divisions[division]) throw Error("저장된 시즌 형식 오류");
   const actions=version===3?tokens.map(token=>"l"+token):tokens;
   const older=version<5 || actions[0]==="v";
-  let state=create(division,seed,!older);
-  for(const token of actions[0]==="v"?actions.slice(1):actions) {
+  const config=actions[0];
+  const hasDifficulty=/^d[012]$/.test(config??"");
+  const difficulty=hasDifficulty?Number(config[1]):1;
+  let state=create(division,seed,!older,difficulty);
+  for(const token of (config==="v" || hasDifficulty)?actions.slice(1):actions) {
     if(token==="h") state=advance(state);
     else if(token==="e") finishEarly(state);
     else if(token==="n") upgradeNews(state);
