@@ -34,15 +34,15 @@ export function create(division=0, seed=Date.now()>>>0) {
 }
 export const value = (p,s) => p.cash + Object.entries(p.holdings).reduce((a,[code,h])=>a+h.qty*s.market[code].price,0);
 export const ranking = s => s.players.filter(p=>p.active).sort((a,b)=>value(b,s)-value(a,s) || a.id-b.id);
-export function trade(s,p,order) {
+export function trade(s,p,order,legacyFees=false) {
   if (!order || !p.active) return null;
   const {code,side,qty}=order, price=s.market[code]?.price;
   if (!p.symbols.includes(code)) throw Error("배정받은 종목만 거래할 수 있습니다.");
   if (!price || !Number.isSafeInteger(qty) || qty<1 || !["buy","sell"].includes(side)) throw Error("주문 수량을 확인하세요.");
   const h=p.holdings[code] || {qty:0,basis:0};
-  const gross=price*qty, fee=Math.ceil(gross*.0025);
+  const gross=price*qty, fee=legacyFees?Math.ceil(gross*.0025):0;
   if (side==="buy") {
-    if(gross+fee>p.cash) throw Error("수수료를 포함한 주문 금액이 예수금을 초과합니다.");
+    if(gross+fee>p.cash) throw Error("주문 금액이 예수금을 초과합니다.");
     p.cash-=gross+fee; h.qty+=qty; h.basis+=gross+fee;
   } else {
     if(qty>h.qty) throw Error("보유 수량을 초과합니다.");
@@ -52,7 +52,20 @@ export function trade(s,p,order) {
   if(h.qty) p.holdings[code]=h; else delete p.holdings[code];
   return {turn:s.turn,id:p.id,name:p.name,code,side,qty,price,fee};
 }
-function decide(s,p,place) {
+export function playerTrade(state,order) {
+  if(state.winner!==null) throw Error("리그가 종료됐습니다.");
+  const fill=trade(state,state.players[0],order);
+  state.trades.push(fill);
+  return fill;
+}
+export function finishEarly(state) {
+  if(state.winner!==null) throw Error("리그가 종료됐습니다.");
+  state.winner=-1;
+  state.endedEarly=true;
+  state.news=null;
+  return state;
+}
+function decide(s,p,place,legacyFees) {
   const n=s.news;
   const entries=firms.filter(([code])=>p.symbols.includes(code)).map(([code,,,base])=>{
     const m=s.market[code], last=m.bars.at(-1);
@@ -79,15 +92,17 @@ function decide(s,p,place) {
       fraction=place>=ranking(s).length-2?.60:.14; break;
   }
   if(!pick || p.holdings[pick.code]) return;
-  const qty=Math.floor(p.cash*Math.min(.70,fraction+s.division*.035)/(pick.price*1.0025+1));
+  const qty=Math.floor(p.cash*Math.min(.70,fraction+s.division*.035)/(legacyFees?pick.price*1.0025+1:pick.price));
   if(qty>0) return {code:pick.code,side:"buy",qty};
 }
-export function advance(previous,order=null) {
+export function advance(previous,order=null,legacyFees=false) {
   if(previous.winner!==null) throw Error("리그가 종료됐습니다.");
   const s=structuredClone(previous);
-  const planned=ranking(previous).flatMap((p,i)=>p.id===0?[]:[[p.id,decide(previous,p,i)]]);
-  const fills=[trade(s,s.players[0],order),...planned.map(([id,request])=>trade(s,s.players[id],request))].filter(Boolean);
-  s.trades.push(...fills);
+  const planned=ranking(previous).flatMap((p,i)=>p.id===0?[]:[[p.id,decide(previous,p,i,legacyFees)]]);
+  const newFills=[trade(s,s.players[0],order,legacyFees),
+    ...planned.map(([id,request])=>trade(s,s.players[id],request,legacyFees))].filter(Boolean);
+  const fills=[...s.trades.filter(fill=>fill.turn===s.turn),...newFills];
+  s.trades.push(...newFills);
   for(const [code] of firms) {
     const m=s.market[code], open=m.price, targeted=code===s.news.code;
     const shock=targeted ? s.news.impact*(s.news.expected?.019:.043)*(0.6+random(s)*.8):0;

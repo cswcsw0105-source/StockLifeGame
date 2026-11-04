@@ -2,3 +2,4 @@
 #queued{margin:0;color:var(--muted)}#result #next{margin-top:14px}#advance{background:var(--mint);color:#0e221b;flex-shrink:0}#feedback:not(:empty){border-left:3px solid var(--mint);padding-left:9px}
 
 .timer-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.timer-row label{display:flex;align-items:center;gap:6px;cursor:pointer}.timer-row input{width:auto;accent-color:var(--mint)}#countdown{font-weight:750;font-variant-numeric:tabular-nums;color:var(--mint)}#countdown[data-urgent="true"]{color:var(--red)}#timer-hint{margin:0 0 12px;font-size:13px}
+.turn-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}#order-preview{margin:8px 0 0;font-variant-numeric:tabular-nums}
