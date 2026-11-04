@@ -6,7 +6,7 @@ const won=n=>number(n)+"원";
 const pct=n=>((n/capital-1)*100).toFixed(2)+"%";
 let seed=Date.now()>>>0, actions=[], state=create(0,seed);
 let feedback="";
-const turnDuration = 30_000;
+const turnDuration = 10_000;
 const speed = $("speed-mode");
 speed.checked = false;
 let timer, deadline, remaining = turnDuration;
