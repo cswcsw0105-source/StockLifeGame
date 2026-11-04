@@ -42,7 +42,13 @@ function news(state) {
   state.seenBriefs.push(article);
   const [title, body, outcomes] = briefs[article];
   const names = new Map(roster(state).map(([code,name])=>[code,name]));
-  const expand = text=>text.replace(/\{([A-Z]+)\}/g, (_,code)=>names.get(code)??code);
+  const expand = text=>text.replace(/\{([A-Z]+)(?::(이\/가|은\/는))?\}/g, (_,code,particle)=>{
+    const name=names.get(code)??code;
+    if(!particle) return name;
+    const last=name.charCodeAt(name.length-1);
+    const hasBatchim=last>=0xac00 && last<=0xd7a3 && (last-0xac00)%28!==0;
+    return name+particle[hasBatchim?0:2];
+  });
   return {article, title:expand(title), body:expand(body), outcomes};
 }
 export function upgradeNews(state) {
