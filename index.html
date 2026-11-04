@@ -9,11 +9,11 @@
 <div class="market">
 <section class="panel news"><small>시장 뉴스</small><div id="news"></div></section>
 <section class="panel"><div class="row"><h2>종목 차트</h2><span class="hint">장중 구간별 캔들</span></div><div id="symbols" class="symbols"></div><div id="chart"></div></section>
-<section class="panel"><h2>시장가 주문</h2><p class="hint">종목과 행동을 먼저 고르세요. 턴을 진행할 때 현재 표시가와 수수료 0.25%로 주문을 처리합니다.</p><div id="orderinfo"></div><div class="orders"><label>수량 <input id="qty" type="number" min="1" step="1" value="1"></label><button id="buy">매수 선택</button><button id="sell">매도 선택</button><button id="wait" class="ghost">보유·관망 선택</button></div><p id="error" role="alert"></p></section>
+<section class="panel"><h2>최근 장 마감 매매</h2><div id="tape"></div></section>
 </div>
 <aside>
 <section class="panel"><h2>내 계좌</h2><div id="account"></div></section>
-<section class="panel"><h2>최근 장 마감 매매</h2><div id="tape"></div></section>
+<section class="panel"><h2>시장가 주문</h2><p class="hint">종목과 행동을 먼저 고르세요. 턴을 진행할 때 현재 표시가와 수수료 0.25%로 주문을 처리합니다.</p><div id="orderinfo"></div><div class="orders"><label>수량 <input id="qty" type="number" min="1" step="1" value="1"></label><button id="buy">매수</button><button id="sell">매도</button><button id="wait" class="ghost">보유·관망</button></div><p id="error" role="alert"></p></section>
 </aside>
 </div><footer>확정한 턴은 이 브라우저의 쿠키에 저장됩니다. 동률이면 고정 참가 번호가 뒤인 선수가 탈락합니다.</footer>
 </main><script type="module" src="app.js"></script></body></html>
