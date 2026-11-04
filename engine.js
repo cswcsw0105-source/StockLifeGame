@@ -15,15 +15,20 @@ function random(state) {
   state.seed = (Math.imul(state.seed, 1664525) + 1013904223) >>> 0;
   return state.seed / 4294967296;
 }
+function drawSymbols(state) {
+  const pool = firms.map(([code]) => code);
+  return Array.from({length:3}, () => pool.splice(Math.floor(random(state)*pool.length), 1)[0]);
+}
 function news(state) {
   const eligible = stories.filter(([,title]) => title !== state.news?.title);
   const [code, title, impact] = eligible[Math.floor(random(state)*eligible.length)];
   return {code, title, impact, expected: random(state) < .35};
 }
 export function create(division=0, seed=Date.now()>>>0) {
-  const state = {version:1, division, seed, turn:0, winner:null, players:names.map(createPlayer),
+  const state = {version:1, division, seed, turn:0, winner:null, players:[],
     market:Object.fromEntries(firms.map(([code,,,price])=>[code,{price, bars:[], drift:0}])),
     trades:[], closing:[], news:null};
+  state.players=names.map((name,id)=>({...createPlayer(name,id), symbols:drawSymbols(state)}));
   state.news=news(state);
   return state;
 }
@@ -32,6 +37,7 @@ export const ranking = s => s.players.filter(p=>p.active).sort((a,b)=>value(b,s)
 export function trade(s,p,order) {
   if (!order || !p.active) return null;
   const {code,side,qty}=order, price=s.market[code]?.price;
+  if (!p.symbols.includes(code)) throw Error("배정받은 종목만 거래할 수 있습니다.");
   if (!price || !Number.isSafeInteger(qty) || qty<1 || !["buy","sell"].includes(side)) throw Error("주문 수량을 확인하세요.");
   const h=p.holdings[code] || {qty:0,basis:0};
   const gross=price*qty, fee=Math.ceil(gross*.0025);
@@ -48,7 +54,7 @@ export function trade(s,p,order) {
 }
 function decide(s,p,place) {
   const n=s.news;
-  const entries=firms.map(([code,,,base])=>{
+  const entries=firms.filter(([code])=>p.symbols.includes(code)).map(([code,,,base])=>{
     const m=s.market[code], last=m.bars.at(-1);
     return {code,price:m.price,momentum:last?(last.close-last.open)/last.open:0,relative:m.price/base-1};
   });
@@ -88,9 +94,7 @@ export function advance(previous,order=null) {
     const reversal=targeted && s.news.expected ? -Math.sign(shock)*random(s)*.043 : 0;
     const flow=fills.filter(f=>f.code===code).reduce((a,f)=>a+(f.side==="buy"?1:-1)*f.qty*open,0);
     const movement=(random(s)-.5)*.035+m.drift+shock+reversal+Math.max(-.014,Math.min(.014,flow/55_000_000));
-    const change = code === "GDR" ? movement*.2 : movement;
-    const indexPrice = code === "MIX" ? firms.slice(0,8).reduce((sum,[id])=>sum+s.market[id].price,0)/8 : null;
-    const close=Math.max(100, money(indexPrice ?? open*(1+Math.max(-.19,Math.min(.19,change)))));
+    const close=Math.max(100, money(open*(1+Math.max(-.19,Math.min(.19,movement)))));
     const high=money(Math.max(open,close)*(1+random(s)*.016));
     const low=money(Math.min(open,close)*(1-random(s)*.016));
     m.price=close; m.drift=targeted?shock*.24:m.drift*.36;

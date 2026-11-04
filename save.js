@@ -1,6 +1,6 @@
 import {create, advance, firms, divisions} from "./engine.js";
 
-const key = "stocklife_season_v2";
+const key = "stocklife_season_v3";
 const maxTurns = 105;
 
 export function encodeSeason(seed, division, actions) {
@@ -20,7 +20,7 @@ export function decodeSeason(value) {
   if (seed > 0xffffffff || !divisions[division]) throw Error("저장된 시즌 형식 오류");
   const actions = tokens.map(token => {
     if (token === "h") return null;
-    if (!/^[bs][0-9][0-9a-z]{1,10}$/.test(token)) throw Error("저장된 주문 형식 오류");
+    if (!/^[bs][0-7][0-9a-z]{1,10}$/.test(token)) throw Error("저장된 주문 형식 오류");
     return {side: token[0] === "b" ? "buy" : "sell", code: firms[Number(token[1])][0], qty:parseInt(token.slice(2),36)};
   });
   return {seed, actions, state:actions.reduce(advance,create(division,seed))};

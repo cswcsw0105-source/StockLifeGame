@@ -4,14 +4,16 @@ import {loadSeason,saveSeason} from "./save.js";
 const number=n=>n.toLocaleString("ko-KR");
 const won=n=>number(n)+"원";
 const pct=n=>((n/capital-1)*100).toFixed(2)+"%";
-let seed=Date.now()>>>0, actions=[], state=create(0,seed), symbol=firms[0][0];
+let seed=Date.now()>>>0, actions=[], state=create(0,seed);
 let queued, feedback="";
 try {
  const saved=loadSeason();
  if(saved) ({seed,actions,state}=saved);
+ else save();
 } catch {
  $("error").textContent="기존 쿠키를 읽지 못해 새 시즌을 열었습니다.";
 }
+let symbol=state.players[0].symbols[0];
 function save() {
  try {
   if(saveSeason(seed,state.division,actions)) return;
@@ -22,6 +24,7 @@ function startSeason(division) {
  seed=Date.now()>>>0;
  actions=[]; queued=undefined; feedback="";
  state=create(division,seed);
+ symbol=state.players[0].symbols[0];
  $("error").textContent="";
  save();render();
 }
@@ -44,9 +47,11 @@ function chart() {
 function render() {
  const day=Math.floor(state.turn/3)+1, phase=phases[state.turn%3], n=state.news, me=state.players[0];
  const closed=state.winner!==null;
+ const own=me.symbols;
+ $("turn-panel").hidden=closed;
  $("season").innerHTML='<strong>'+divisions[state.division]+' 리그</strong>'+(closed?'시즌 종료':Math.ceil(day/5)+'주차 · '+day+'일 · '+phase);
- $("news").innerHTML=n?'<h2>'+n.title+'</h2><span class="badge '+(n.impact>0?"positive":"negative")+'">'+grade[n.impact]+'</span><p>'+firms.find(([code])=>code===n.code)[1]+' · '+(n.expected?"시장에 돌던 소문입니다. 일부는 이미 가격에 반영됐을 수 있습니다.":"시장에 새로 공개된 정보입니다.")+'</p>':'<p>시즌이 마감됐습니다.</p>';
- $("symbols").innerHTML=firms.map(([code,name])=>'<button data-code="'+code+'" class="'+(code===symbol?"selected":"")+'" aria-pressed="'+(code===symbol)+'">'+name+'</button>').join("");
+ $("news").innerHTML=n&&own.includes(n.code)?'<h2>'+n.title+'</h2><span class="badge '+(n.impact>0?"positive":"negative")+'">'+grade[n.impact]+'</span><p>'+firms.find(([code])=>code===n.code)[1]+' · '+(n.expected?"시장에 돌던 소문입니다. 일부는 이미 가격에 반영됐을 수 있습니다.":"시장에 새로 공개된 정보입니다.")+'</p>':closed?'<p>시즌이 마감됐습니다.</p>':'<p>이번 턴에는 배정 종목 관련 뉴스가 없습니다.</p>';
+ $("symbols").innerHTML=firms.filter(([code])=>own.includes(code)).map(([code,name])=>'<button data-code="'+code+'" class="'+(code===symbol?"selected":"")+'" aria-pressed="'+(code===symbol)+'">'+name+'</button>').join("");
  const market=state.market[symbol], last=market.bars.at(-1);
  const move=last?((last.close/last.open-1)*100):0;
  $("orderinfo").textContent=won(market.price)+" · 직전 턴 "+(move>0?"+":"")+move.toFixed(2)+"% · 보유 "+(me.holdings[symbol]?.qty||0)+"주";
@@ -56,19 +61,19 @@ function render() {
  $("feedback").textContent=feedback;
  $("advance").disabled=closed||queued===undefined;
  for(const id of ["buy","sell","wait","qty"]) $(id).disabled=closed;
- $("ranks").innerHTML=[...ranking(state),...state.players.filter(p=>!p.active).sort((a,b)=>b.exit.week-a.exit.week)].map((p,i)=>{
-  const v=p.exit?.total??value(p,state);
-  return '<div class="rank '+(p.id===0?"me ":"")+(!p.active?"out":"")+'"><div>'+ (p.active?(i+1)+'위':p.exit.week+'주차 탈락')+' · '+p.name+'<small>'+(p.id?rivals[p.id-1][1]:"플레이어")+'</small></div><div>'+won(v)+'<small>'+pct(v)+'</small></div></div>';
- }).join("");
  $("account").innerHTML='<div class="asset"><span>예수금</span><strong>'+won(me.cash)+'</strong></div><div class="asset"><span>평가자산</span><strong>'+won(me.exit?.total??value(me,state))+'</strong></div>'+Object.entries(me.holdings).map(([code,h])=>'<div class="asset"><span>'+firms.find(f=>f[0]===code)[1]+'</span><span>'+h.qty+'주</span></div>').join("");
  const end=Math.floor(state.turn/3)*3;
- const tape=state.trades.filter(f=>f.turn>=end-3&&f.turn<end);
+ const tape=state.trades.filter(f=>f.turn>=end-3&&f.turn<end&&own.includes(f.code));
  $("tape").innerHTML=end&&tape.length?tape.map(f=>'<div class="fill"><div>'+f.name+'<small>'+firms.find(x=>x[0]===f.code)[1]+'</small></div><div>'+(f.side==="buy"?"매수":"매도")+' '+f.qty+'주<small>'+won(f.price)+'</small></div></div>').join(""):'<p class="hint">완료된 거래일의 주문 내역이 표시됩니다.</p>';
  const result=$("result");
  result.hidden=!closed;
  if(closed) {
  const win=state.winner===0;
- result.innerHTML='<h2>'+(win?"리그 우승":"시즌 탈락")+'</h2><p>'+(win?"다음 리그는 동일한 시작 자금으로 진행합니다.":"다음 시즌에 다시 도전할 수 있습니다.")+'</p><button id="next">'+(win&&state.division<divisions.length-1?"상위 리그로 승격":"이 리그 다시 시작")+'</button>';
+ const standings=[...ranking(state),...state.players.filter(p=>!p.active).sort((a,b)=>b.exit.week-a.exit.week)].map((p,i)=>{
+  const v=p.exit?.total??value(p,state);
+  return '<div class="rank '+(p.id===0?"me ":"")+(!p.active?"out":"")+'"><div>'+ ((i+1)+'위'+(p.exit?' · '+p.exit.week+'주차 탈락':''))+' · '+p.name+'<small>'+(p.id?rivals[p.id-1][1]:"플레이어")+'</small></div><div>'+won(v)+'<small>'+pct(v)+'</small></div></div>';
+ }).join("");
+ result.innerHTML='<h2>'+(win?"리그 우승":"시즌 탈락")+'</h2><p>'+(win?"다음 리그는 동일한 시작 자금으로 진행합니다.":"다음 시즌에 다시 도전할 수 있습니다.")+'</p><h2>시즌 결과</h2><p class="hint">생존자는 시즌 종료 시점, 탈락자는 탈락 시점 기준</p>'+standings+'<button id="next">'+(win&&state.division<divisions.length-1?"상위 리그로 승격":"이 리그 다시 시작")+'</button>';
  $("next").onclick=()=>{startSeason(Math.min(state.division+(win?1:0),divisions.length-1));};
  }
  chart();
